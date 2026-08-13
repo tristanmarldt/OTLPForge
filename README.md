@@ -89,7 +89,6 @@ From **inside** a tab you can switch without going back to the list:
 | Key | Action |
 |-----|--------|
 | `Ctrl+O` / `Ctrl+R` | Next / previous tab |
-| `F1` – `F5` | Jump straight to a tab |
 | `Esc` | Back to the tab list |
 
 `Ctrl+1`–`5` is deliberately not used: terminals cannot transmit it — `Ctrl+1`

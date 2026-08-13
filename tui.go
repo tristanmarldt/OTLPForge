@@ -225,20 +225,15 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// ctrl+<digit> is deliberately not used: terminals cannot transmit it
 		// (ctrl+1 sends nothing, ctrl+3 arrives as Esc) and bubbletea has no
-		// key for it. ctrl+o is free — huh and bubbles between them claim
-		// ctrl+a/b/c/d/e/f/h/j/k/m/n/p/t/u/v/w — and F-keys work wherever the
-		// terminal sends them.
+		// key for it. ctrl+o and ctrl+r are among the few free letters — huh
+		// and bubbles between them claim ctrl+a/b/c/d/e/f/h/j/k/m/n/p/t/u/v/w,
+		// ctrl+q and ctrl+s are flow control, and ctrl+z suspends.
 		if tabs := m.currentTabs(); tabs != nil {
 			switch k.String() {
 			case "ctrl+o":
 				return m.switchTab((m.currentTab() + 1) % len(tabs))
 			case "ctrl+r":
 				return m.switchTab((m.currentTab() - 1 + len(tabs)) % len(tabs))
-			case "f1", "f2", "f3", "f4", "f5":
-				if i := int(k.String()[1] - '1'); i < len(tabs) {
-					return m.switchTab(i)
-				}
-				return m, nil
 			}
 		}
 	}
@@ -605,17 +600,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						}
 						return nil
 					}),
-				huh.NewSelect[string]().
-					Title(settingsLabel("Span kind")).
-					Inline(true).
-					Options(
-						huh.NewOption("server", "server"),
-						huh.NewOption("client", "client"),
-						huh.NewOption("internal", "internal"),
-						huh.NewOption("producer", "producer"),
-						huh.NewOption("consumer", "consumer"),
-					).
-					Value(&m.fSpanKind),
+				newChoiceField("spanKind", settingsLabel("Span kind"), &m.fSpanKind, spanKindOptions),
 				huh.NewConfirm().
 					Title(settingsLabel("Enabled")).
 					Inline(true).
@@ -1121,7 +1106,7 @@ func (m *tui) tabBar(names []string, active int) string {
 // tabSwitchHint is shown under the tab bar while a form is focused, so the
 // in-form switch keys are discoverable without opening the help overlay.
 func (m *tui) tabSwitchHint() string {
-	full := "  ctrl+o / ctrl+r  next / prev tab   ·   f1-f5  jump   ·   esc  tab list"
+	full := "  ctrl+o / ctrl+r  next / prev tab   ·   esc  tab list"
 	if lipgloss.Width(full) <= m.width {
 		return sHelp.Render(full)
 	}
@@ -1302,7 +1287,6 @@ func (m *tui) helpView() string {
 		{"Editor — inside a tab", []row{
 			{"ctrl+o", "next tab, without leaving the form"},
 			{"ctrl+r", "previous tab"},
-			{"f1 – f5", "jump straight to a tab"},
 			{"esc", "back to the tab list"},
 			{"space", "toggle a signal on the Settings tab"},
 			{"alt+enter", "new line inside an attribute textarea"},

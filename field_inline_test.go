@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
 func sigKey(s string) tea.KeyMsg {
@@ -102,6 +103,107 @@ func TestSignalsFieldAdvancesForm(t *testing.T) {
 	}
 	if _, cmd := f.Update(tea.KeyMsg{Type: tea.KeyShiftTab}); cmd == nil {
 		t.Error("shift+tab should return a command moving to the previous field")
+	}
+}
+
+// ── choiceField (span kind) ───────────────────────────────────────────────────
+
+func TestChoiceFieldRendersOneRow(t *testing.T) {
+	v := "client"
+	f := newChoiceField("spanKind", "Span kind", &v, spanKindOptions)
+	f.WithWidth(90)
+
+	view := f.View()
+	if n := strings.Count(view, "\n") + 1; n != 1 {
+		t.Errorf("expected a single row, got %d:\n%s", n, view)
+	}
+	for _, want := range spanKindOptions {
+		if !strings.Contains(view, want) {
+			t.Errorf("view is missing option %q: %s", want, view)
+		}
+	}
+}
+
+// TestChoiceFieldCompactWhenNarrow checks the fallback that keeps the control
+// on one row when the full option set will not fit.
+func TestChoiceFieldCompactWhenNarrow(t *testing.T) {
+	v := "producer"
+	f := newChoiceField("spanKind", "Span kind", &v, spanKindOptions)
+	f.WithWidth(30)
+
+	view := f.View()
+	if n := strings.Count(view, "\n") + 1; n != 1 {
+		t.Errorf("expected a single row, got %d:\n%s", n, view)
+	}
+	if !strings.Contains(view, "producer") {
+		t.Errorf("compact view must still show the current value: %s", view)
+	}
+	if strings.Contains(view, "consumer") {
+		t.Errorf("compact view should show only the current value: %s", view)
+	}
+}
+
+func TestChoiceFieldArrowsChangeValue(t *testing.T) {
+	v := "server" // index 0
+	f := newChoiceField("spanKind", "Span kind", &v, spanKindOptions)
+	f.Focus()
+
+	f.Update(sigKey("right"))
+	if v != "client" {
+		t.Errorf("after →: %q, want client", v)
+	}
+	f.Update(sigKey("left"))
+	if v != "server" {
+		t.Errorf("after →←: %q, want server", v)
+	}
+
+	// clamps at both ends rather than wrapping
+	for i := 0; i < 5; i++ {
+		f.Update(sigKey("left"))
+	}
+	if v != "server" {
+		t.Errorf("ran past the left edge: %q", v)
+	}
+	for i := 0; i < 9; i++ {
+		f.Update(sigKey("right"))
+	}
+	if want := spanKindOptions[len(spanKindOptions)-1]; v != want {
+		t.Errorf("ran past the right edge: %q, want %q", v, want)
+	}
+}
+
+// TestChoiceFieldStartsOnCurrentValue guards against the cursor resetting to
+// the first option when the editor is reopened.
+func TestChoiceFieldStartsOnCurrentValue(t *testing.T) {
+	v := "consumer" // last option
+	f := newChoiceField("spanKind", "Span kind", &v, spanKindOptions)
+	f.Focus()
+
+	f.Update(sigKey("left"))
+	if want := spanKindOptions[len(spanKindOptions)-2]; v != want {
+		t.Errorf("cursor did not start on the current value: got %q, want %q", v, want)
+	}
+}
+
+// TestSpanKindRoundTripsThroughConfig checks every option the field offers is
+// accepted by validateConfig and maps to a real OTLP span kind.
+func TestSpanKindRoundTripsThroughConfig(t *testing.T) {
+	m := testTUI(t)
+	m.loadServiceFields(0)
+
+	for _, kind := range spanKindOptions {
+		m.fSpanKind = kind
+		svc := m.buildServiceFromFields()
+		if svc.SpanKind != kind {
+			t.Errorf("span kind %q did not survive: %q", kind, svc.SpanKind)
+		}
+		cfg := Config{Services: []Service{svc}}
+		if err := validateConfig(normalizeConfig(cfg)); err != nil {
+			t.Errorf("validateConfig rejects span kind %q: %v", kind, err)
+		}
+		if got := mapSpanKind(kind); got == tracepb.Span_SPAN_KIND_UNSPECIFIED {
+			t.Errorf("mapSpanKind(%q) is unspecified", kind)
+		}
 	}
 }
 

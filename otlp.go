@@ -94,15 +94,141 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 	}
 }
 
-// svcAttributes builds the resource attribute list for a service, always
-// including service.name (which wins over any caller-supplied value).
+// svcAttributes builds the resource attribute list for a service.
+// Precedence: service.name (fixed) > svc.Attributes (user) > infraDefaults (template).
 func svcAttributes(svc Service) []*commonpb.KeyValue {
-	merged := make(map[string]AttrValue, len(svc.Attributes)+1)
+	merged := infraDefaults(svc)
+	if merged == nil {
+		merged = make(map[string]AttrValue, len(svc.Attributes)+1)
+	}
 	for k, v := range svc.Attributes {
 		merged[k] = v
 	}
 	merged["service.name"] = strAttrVal(svc.Name) // always wins
 	return toOTLPAttributes(merged)
+}
+
+// infraDefaults returns resource attributes for the service's InfraTemplate.
+// Values are deterministic so resource attributes stay stable across ticks.
+// Users override specific values via svc.Attributes.
+func infraDefaults(svc Service) map[string]AttrValue {
+	name := svc.Name
+	switch svc.InfraTemplate {
+
+	case "k8s":
+		return map[string]AttrValue{
+			"k8s.cluster.name":    strAttrVal("my-cluster"),
+			"k8s.namespace.name":  strAttrVal("default"),
+			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
+			"k8s.node.name":       strAttrVal("node-1"),
+			"k8s.deployment.name": strAttrVal(name),
+			"k8s.container.name":  strAttrVal(name),
+		}
+
+	case "eks":
+		return map[string]AttrValue{
+			"k8s.cluster.name":    strAttrVal("my-eks-cluster"),
+			"k8s.namespace.name":  strAttrVal("default"),
+			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
+			"k8s.node.name":       strAttrVal("ip-10-0-1-100.ec2.internal"),
+			"k8s.deployment.name": strAttrVal(name),
+			"k8s.container.name":  strAttrVal(name),
+			"cloud.provider":      strAttrVal("aws"),
+			"cloud.platform":      strAttrVal("aws_eks"),
+			"cloud.region":        strAttrVal("us-east-1"),
+			"cloud.account.id":    strAttrVal("123456789012"),
+		}
+
+	case "gke":
+		return map[string]AttrValue{
+			"k8s.cluster.name":    strAttrVal("my-gke-cluster"),
+			"k8s.namespace.name":  strAttrVal("default"),
+			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
+			"k8s.node.name":       strAttrVal("gke-my-cluster-default-pool-abc12345-abcd"),
+			"k8s.deployment.name": strAttrVal(name),
+			"k8s.container.name":  strAttrVal(name),
+			"cloud.provider":      strAttrVal("gcp"),
+			"cloud.platform":      strAttrVal("gcp_kubernetes_engine"),
+			"cloud.region":        strAttrVal("us-central1"),
+			"cloud.account.id":    strAttrVal("my-gcp-project"),
+		}
+
+	case "aks":
+		return map[string]AttrValue{
+			"k8s.cluster.name":    strAttrVal("my-aks-cluster"),
+			"k8s.namespace.name":  strAttrVal("default"),
+			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
+			"k8s.node.name":       strAttrVal("aks-nodepool1-12345678-vmss000000"),
+			"k8s.deployment.name": strAttrVal(name),
+			"k8s.container.name":  strAttrVal(name),
+			"cloud.provider":      strAttrVal("azure"),
+			"cloud.platform":      strAttrVal("azure_aks"),
+			"cloud.region":        strAttrVal("eastus"),
+		}
+
+	case "ecs":
+		return map[string]AttrValue{
+			"aws.ecs.cluster.arn":   strAttrVal("arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster"),
+			"aws.ecs.task.arn":      strAttrVal("arn:aws:ecs:us-east-1:123456789012:task/my-cluster/abcdef1234567890abcdef12"),
+			"aws.ecs.task.family":   strAttrVal(name),
+			"aws.ecs.container.name": strAttrVal(name),
+			"aws.ecs.container.arn": strAttrVal("arn:aws:ecs:us-east-1:123456789012:container/my-cluster/abcdef1234567890abcdef12/a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+			"cloud.provider":        strAttrVal("aws"),
+			"cloud.platform":        strAttrVal("aws_ecs"),
+			"cloud.region":          strAttrVal("us-east-1"),
+			"cloud.account.id":      strAttrVal("123456789012"),
+		}
+
+	case "host":
+		return map[string]AttrValue{
+			"host.name":  strAttrVal("prod-server-01"),
+			"host.id":    strAttrVal("i-0abcdef1234567890"),
+			"host.type":  strAttrVal("m5.large"),
+			"host.arch":  strAttrVal("amd64"),
+			"os.type":    strAttrVal("linux"),
+			"os.version": strAttrVal("5.15.0"),
+		}
+
+	case "docker":
+		return map[string]AttrValue{
+			"container.name":       strAttrVal(name),
+			"container.id":         strAttrVal("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
+			"container.image.name": strAttrVal(name),
+			"container.image.tag":  strAttrVal("latest"),
+			"host.name":            strAttrVal("docker-host-01"),
+		}
+
+	case "lambda":
+		return map[string]AttrValue{
+			"cloud.provider":  strAttrVal("aws"),
+			"cloud.platform":  strAttrVal("aws_lambda"),
+			"cloud.region":    strAttrVal("us-east-1"),
+			"cloud.account.id": strAttrVal("123456789012"),
+			"faas.name":       strAttrVal(name),
+			"faas.version":    strAttrVal("$LATEST"),
+			"faas.max_memory": intAttrVal(512),
+		}
+
+	case "cloudfoundry":
+		return map[string]AttrValue{
+			"cloudfoundry.app.id":      strAttrVal("abc12345-def6-7890-abcd-ef1234567890"),
+			"cloudfoundry.app.name":    strAttrVal(name),
+			"cloudfoundry.space.name":  strAttrVal("development"),
+			"cloudfoundry.org.name":    strAttrVal("my-org"),
+			"cloudfoundry.instance.id": strAttrVal("0"),
+		}
+
+	case "process":
+		return map[string]AttrValue{
+			"process.pid":             intAttrVal(12345),
+			"process.executable.name": strAttrVal(name),
+			"process.runtime.name":    strAttrVal("go"),
+			"process.runtime.version": strAttrVal("1.24.0"),
+			"host.name":               strAttrVal("localhost"),
+		}
+	}
+
+	return nil
 }
 
 func toOTLPAttributes(values map[string]AttrValue) []*commonpb.KeyValue {
@@ -133,6 +259,7 @@ func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed b
 		EndTimeUnixNano:   uint64(end.UnixNano()),
 	}
 	applyFailure(span, failed)
+	tmplAttrs = applySpanAttrOverrides(tmplAttrs, svc.SpanAttrs)
 	span.Attributes = append(span.Attributes, tmplAttrs...)
 	return span
 }
@@ -170,8 +297,47 @@ var (
 	}
 )
 
+// templateDefaults returns the editable/overridable attribute defaults for a
+// given template. These values are used to seed the span-attrs editor and as
+// fallback when SpanAttrs is empty.
+func templateDefaults(template string) map[string]AttrValue {
+	switch template {
+	case "http-server":
+		return map[string]AttrValue{
+			"server.address":           strAttrVal("my-service.internal"),
+			"url.scheme":               strAttrVal("https"),
+			"network.protocol.version": strAttrVal("1.1"),
+		}
+	case "http-client":
+		return map[string]AttrValue{
+			"server.address":           strAttrVal("api.example.com"),
+			"server.port":              intAttrVal(443),
+			"network.protocol.version": strAttrVal("1.1"),
+		}
+	case "db":
+		return map[string]AttrValue{
+			"db.system.name": strAttrVal("postgresql"),
+			"db.namespace":   strAttrVal("mydb"),
+			"server.address": strAttrVal("db.internal"),
+			"server.port":    intAttrVal(5432),
+		}
+	case "messaging":
+		return map[string]AttrValue{
+			"messaging.system":           strAttrVal("kafka"),
+			"messaging.destination.name": strAttrVal("my-topic"),
+		}
+	case "grpc":
+		return map[string]AttrValue{
+			"rpc.service": strAttrVal("MyService"),
+			"rpc.method":  strAttrVal("MyMethod"),
+		}
+	}
+	return nil
+}
+
 // templateInfo returns the span name and extra semantic-convention attributes
 // for svc.Template, or a generic name and nil attrs when no template is set.
+// Values in svc.SpanAttrs override randomly selected template defaults.
 func templateInfo(svc Service, failed bool) (string, []*commonpb.KeyValue) {
 	rnd := func(items []string) string { return items[mathrand.IntN(len(items))] }
 
@@ -263,6 +429,27 @@ func templateInfo(svc Service, failed bool) (string, []*commonpb.KeyValue) {
 
 	// no template → generic name
 	return svc.Name + ".request", nil
+}
+
+// applySpanAttrOverrides merges user-supplied SpanAttrs on top of the
+// template-generated attribute list. Known keys are replaced; new keys appended.
+func applySpanAttrOverrides(attrs []*commonpb.KeyValue, overrides map[string]AttrValue) []*commonpb.KeyValue {
+	if len(overrides) == 0 {
+		return attrs
+	}
+	// index existing attrs by key
+	idx := make(map[string]int, len(attrs))
+	for i, a := range attrs {
+		idx[a.Key] = i
+	}
+	for _, ov := range toOTLPAttributes(overrides) {
+		if i, exists := idx[ov.Key]; exists {
+			attrs[i] = ov
+		} else {
+			attrs = append(attrs, ov)
+		}
+	}
+	return attrs
 }
 
 func mapSpanKind(value string) tracepb.Span_SpanKind {

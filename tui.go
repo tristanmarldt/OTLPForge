@@ -46,6 +46,7 @@ const (
 	screenList tuiScreen = iota
 	screenServiceEdit
 	screenAttrsEdit
+	screenSpanAttrsEdit
 	screenGlobal
 	screenConfirmDelete
 )
@@ -70,6 +71,7 @@ type tui struct {
 	// bound form fields – service editor
 	fName            string
 	fTemplate        string
+	fInfraTemplate   string
 	fSpanKind        string
 	fFailure         string
 	fInterval        string
@@ -77,6 +79,7 @@ type tui struct {
 	fSignals         []string
 	fEnabled         bool
 	fAttrs           string
+	fSpanAttrs       string
 	fDeleteConfirmed bool
 
 	// bound form fields – global settings
@@ -163,6 +166,8 @@ func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 		return m.commitService()
 	case screenAttrsEdit:
 		return m.commitAttrs()
+	case screenSpanAttrsEdit:
+		return m.commitSpanAttrs()
 	case screenGlobal:
 		return m.commitGlobal()
 	case screenConfirmDelete:
@@ -207,6 +212,11 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.openAttrsForm(m.cursor)
 		}
 
+	case "s":
+		if len(svcs) > 0 {
+			return m.openSpanAttrsForm(m.cursor)
+		}
+
 	case "d":
 		if len(svcs) > 0 {
 			return m.openDeleteConfirm()
@@ -231,8 +241,9 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 	m.editIdx = idx
 	if idx == -1 {
-		m.fName = ""
+		m.fName = "otgen-"
 		m.fTemplate = ""
+		m.fInfraTemplate = ""
 		m.fSpanKind = "server"
 		m.fFailure = "5"
 		m.fInterval = "5"
@@ -240,10 +251,12 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 		m.fSignals = []string{"spans", "metrics", "logs"}
 		m.fEnabled = true
 		m.fAttrs = ""
+		m.fSpanAttrs = ""
 	} else {
 		svc := m.cfg.Services[idx]
 		m.fName = svc.Name
 		m.fTemplate = svc.Template
+		m.fInfraTemplate = svc.InfraTemplate
 		m.fSpanKind = svc.SpanKind
 		m.fFailure = strconv.Itoa(svc.FailureRate)
 		m.fInterval = strconv.Itoa(svc.Interval)
@@ -254,7 +267,18 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 			m.fSignals = append([]string(nil), svc.Signals...)
 		}
 		m.fEnabled = svc.Enabled
-		m.fAttrs = attrsToText(svc.Attributes)
+		// resource attrs: user attrs; seed from infra template defaults if empty
+		if len(svc.Attributes) > 0 {
+			m.fAttrs = attrsToText(svc.Attributes)
+		} else {
+			m.fAttrs = attrsToText(infraDefaults(svc))
+		}
+		// span attrs: show overrides; fall back to span template defaults when empty
+		if len(svc.SpanAttrs) > 0 {
+			m.fSpanAttrs = attrsToText(svc.SpanAttrs)
+		} else {
+			m.fSpanAttrs = attrsToText(templateDefaults(svc.Template))
+		}
 	}
 
 	w := m.formWidth()
@@ -270,7 +294,7 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 					return nil
 				}),
 			huh.NewSelect[string]().
-				Title("Template").
+				Title("Span template").
 				Description("Pre-fills OTel semantic convention attributes on each span").
 				Options(
 					huh.NewOption("None (generic)", ""),
@@ -281,6 +305,23 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 					huh.NewOption("gRPC", "grpc"),
 				).
 				Value(&m.fTemplate),
+			huh.NewSelect[string]().
+				Title("Infrastructure template").
+				Description("Pre-fills resource attributes for the deployment environment").
+				Options(
+					huh.NewOption("None", ""),
+					huh.NewOption("Kubernetes (k8s.*)", "k8s"),
+					huh.NewOption("Amazon EKS (k8s.* + aws)", "eks"),
+					huh.NewOption("Google GKE (k8s.* + gcp)", "gke"),
+					huh.NewOption("Azure AKS (k8s.* + azure)", "aks"),
+					huh.NewOption("Amazon ECS / Fargate", "ecs"),
+					huh.NewOption("Host / VM (host.*, os.*)", "host"),
+					huh.NewOption("Docker (container.*)", "docker"),
+					huh.NewOption("AWS Lambda / FaaS", "lambda"),
+					huh.NewOption("Cloud Foundry / Tanzu", "cloudfoundry"),
+					huh.NewOption("Process (process.*)", "process"),
+				).
+				Value(&m.fInfraTemplate),
 			huh.NewSelect[string]().
 				Title("Span kind").
 				Options(
@@ -340,8 +381,15 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 			huh.NewText().
 				Title("Resource attributes").
 				Description("key=value per line · true/false→bool · 42→int · 3.14→double · \"42\"→string · esc: cancel").
-				Lines(8).
+				Lines(6).
 				Value(&m.fAttrs),
+		),
+		huh.NewGroup(
+			huh.NewText().
+				Title("Span attribute overrides").
+				Description("Override or add span-level semantic-convention attributes from the template · esc: cancel").
+				Lines(8).
+				Value(&m.fSpanAttrs),
 		),
 	).WithWidth(w)
 
@@ -362,15 +410,17 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 	}
 
 	svc := Service{
-		Name:        strings.TrimSpace(m.fName),
-		Template:    m.fTemplate,
-		SpanKind:    m.fSpanKind,
-		FailureRate: failRate,
-		Interval:    interval,
-		ChildSpans:  childSpans,
-		Signals:     signals,
-		Enabled:     m.fEnabled,
-		Attributes:  parseAttrs(m.fAttrs),
+		Name:          strings.TrimSpace(m.fName),
+		Template:      m.fTemplate,
+		InfraTemplate: m.fInfraTemplate,
+		SpanKind:      m.fSpanKind,
+		FailureRate:   failRate,
+		Interval:      interval,
+		ChildSpans:    childSpans,
+		Signals:       signals,
+		Enabled:       m.fEnabled,
+		Attributes:    parseAttrs(m.fAttrs),
+		SpanAttrs:     parseAttrs(m.fSpanAttrs),
 	}
 
 	cfg := m.cfg
@@ -394,7 +444,12 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 func (m *tui) openAttrsForm(idx int) (tea.Model, tea.Cmd) {
 	m.editIdx = idx
 	svc := m.cfg.Services[idx]
-	m.fAttrs = attrsToText(svc.Attributes)
+	// Seed with existing attrs; fall back to infra template defaults when empty.
+	if len(svc.Attributes) > 0 {
+		m.fAttrs = attrsToText(svc.Attributes)
+	} else {
+		m.fAttrs = attrsToText(infraDefaults(svc))
+	}
 
 	m.form = huh.NewForm(
 		huh.NewGroup(
@@ -425,6 +480,58 @@ func (m *tui) commitAttrs() (tea.Model, tea.Cmd) {
 	} else {
 		m.cfg = cfg
 		m.setFlash("attributes saved", false)
+	}
+	return m, nil
+}
+
+// ── span attributes quick-edit form ──────────────────────────────────────────
+
+func (m *tui) openSpanAttrsForm(idx int) (tea.Model, tea.Cmd) {
+	m.editIdx = idx
+	svc := m.cfg.Services[idx]
+
+	// Seed with existing overrides, or with template defaults if none set yet.
+	if len(svc.SpanAttrs) > 0 {
+		m.fSpanAttrs = attrsToText(svc.SpanAttrs)
+	} else {
+		m.fSpanAttrs = attrsToText(templateDefaults(svc.Template))
+	}
+
+	title := fmt.Sprintf("Span attrs — %s", svc.Name)
+	desc := "Override span-level semantic-convention attributes from the template · esc: cancel"
+	if svc.Template == "" {
+		desc = "No template active — attributes are added directly to each span · esc: cancel"
+	}
+
+	m.form = huh.NewForm(
+		huh.NewGroup(
+			huh.NewText().
+				Title(title).
+				Description(desc).
+				Lines(12).
+				Value(&m.fSpanAttrs),
+		),
+	).WithWidth(m.formWidth())
+
+	m.screen = screenSpanAttrsEdit
+	return m, m.form.Init()
+}
+
+func (m *tui) commitSpanAttrs() (tea.Model, tea.Cmd) {
+	m.screen = screenList
+	m.form = nil
+
+	svcs := make([]Service, len(m.cfg.Services))
+	copy(svcs, m.cfg.Services)
+	svcs[m.editIdx].SpanAttrs = parseAttrs(m.fSpanAttrs)
+
+	cfg := m.cfg
+	cfg.Services = svcs
+	if err := m.app.SetConfig(cfg); err != nil {
+		m.setFlash("error: "+err.Error(), true)
+	} else {
+		m.cfg = cfg
+		m.setFlash("span attributes saved", false)
 	}
 	return m, nil
 }
@@ -651,11 +758,15 @@ func (m *tui) renderService(i int, svc Service) string {
 		name = sBold.Render(name)
 	}
 
-	var kindTag string
+	var spanTag string
 	if svc.Template != "" {
-		kindTag = sMuted.Render("[" + svc.Template + "]")
+		spanTag = sMuted.Render("[" + svc.Template + "]")
 	} else {
-		kindTag = sMuted.Render(svc.SpanKind)
+		spanTag = sMuted.Render(svc.SpanKind)
+	}
+	var infraTag string
+	if svc.InfraTemplate != "" {
+		infraTag = "  " + sMuted.Render("["+svc.InfraTemplate+"]")
 	}
 	errRate := sMuted.Render(fmt.Sprintf("%d%% err", svc.FailureRate))
 	interval := sMuted.Render(fmt.Sprintf("%ds", svc.Interval))
@@ -663,7 +774,7 @@ func (m *tui) renderService(i int, svc Service) string {
 	if svc.ChildSpans > 0 {
 		children = "  " + sMuted.Render(fmt.Sprintf("+%d child", svc.ChildSpans))
 	}
-	row1 := fmt.Sprintf("%s%s %s  %s  %s  %s%s", cursor, dot, name, kindTag, errRate, interval, children)
+	row1 := fmt.Sprintf("%s%s %s  %s%s  %s  %s%s", cursor, dot, name, spanTag, infraTag, errRate, interval, children)
 
 	// live signal counters
 	ss := m.status.Services[svc.Name]
@@ -684,14 +795,69 @@ func (m *tui) renderService(i int, svc Service) string {
 			break
 		}
 	}
-
 	row2 := "    " + sMuted.Render(strings.Join(parts, "  "))
+
+	// span attribute preview: show effective attrs (overrides > template defaults)
+	effectiveSpanAttrs := svc.SpanAttrs
+	if len(effectiveSpanAttrs) == 0 && svc.Template != "" {
+		effectiveSpanAttrs = templateDefaults(svc.Template)
+	}
+	var row3 string
+	if len(effectiveSpanAttrs) > 0 {
+		preview := attrsPreview(effectiveSpanAttrs, 4)
+		suffix := ""
+		if len(effectiveSpanAttrs) > 4 {
+			suffix = fmt.Sprintf(" +%d", len(effectiveSpanAttrs)-4)
+		}
+		indicator := "~"
+		if len(svc.SpanAttrs) > 0 {
+			indicator = "✎"
+		}
+		row3 = "    " + sMuted.Render(indicator+" "+preview+suffix)
+	}
+
+	if row3 != "" {
+		return row1 + "\n" + row2 + "\n" + row3
+	}
 	return row1 + "\n" + row2
 }
 
 func (m *tui) renderHelp() string {
-	keys := []string{"n new", "↵ edit", "a attrs", "d delete", "␣ toggle", "r run/stop", "g settings", "q quit"}
+	keys := []string{"n new", "↵ edit", "a res-attrs", "s span-attrs", "d delete", "␣ toggle", "r run/stop", "g settings", "q quit"}
 	return sHelp.Render("  " + strings.Join(keys, "  ·  "))
+}
+
+// attrsPreview returns up to max key=value pairs from attrs as a compact string.
+func attrsPreview(attrs map[string]AttrValue, max int) string {
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for i, k := range keys {
+		if i >= max {
+			break
+		}
+		v := attrs[k]
+		var val string
+		switch v.Type {
+		case "bool":
+			if v.Bool {
+				val = "true"
+			} else {
+				val = "false"
+			}
+		case "int":
+			val = strconv.FormatInt(v.Int, 10)
+		case "double":
+			val = strconv.FormatFloat(v.Double, 'f', -1, 64)
+		default:
+			val = v.Str
+		}
+		parts = append(parts, k+"="+val)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m *tui) formWidth() int {

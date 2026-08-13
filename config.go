@@ -100,15 +100,17 @@ func doubleAttrVal(v float64) AttrValue { return AttrValue{Type: "double", Doubl
 
 // Service defines a named synthetic service to emit OTLP signals for.
 type Service struct {
-	Name        string               `json:"name"`
-	Template    string               `json:"template,omitempty"` // "", "http-server", "http-client", "db", "messaging", "grpc"
-	SpanKind    string               `json:"spanKind"`            // server|client|internal|producer|consumer
-	FailureRate int                  `json:"failureRate"`         // 0–100 %
-	Interval    int                  `json:"interval"`            // seconds between sends, minimum 1
-	ChildSpans  int                  `json:"childSpans"`          // additional client spans under the root, 0–10
-	Signals     []string             `json:"signals"`             // "spans","metrics","logs"; empty = all three
-	Attributes  map[string]AttrValue `json:"attributes"`          // service.name is always added automatically
-	Enabled     bool                 `json:"enabled"`
+	Name          string               `json:"name"`
+	Template      string               `json:"template,omitempty"`      // span semantics: "", "http-server", "http-client", "db", "messaging", "grpc"
+	InfraTemplate string               `json:"infraTemplate,omitempty"` // infra context: "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process"
+	SpanKind      string               `json:"spanKind"`                // server|client|internal|producer|consumer
+	FailureRate   int                  `json:"failureRate"`             // 0–100 %
+	Interval      int                  `json:"interval"`                // seconds between sends, minimum 1
+	ChildSpans    int                  `json:"childSpans"`              // additional client spans under the root, 0–10
+	Signals       []string             `json:"signals"`                 // "spans","metrics","logs"; empty = all three
+	Attributes    map[string]AttrValue `json:"attributes"`              // resource-level; service.name always wins
+	SpanAttrs     map[string]AttrValue `json:"spanAttrs,omitempty"`     // span-level overrides for template-generated attributes
+	Enabled       bool                 `json:"enabled"`
 }
 
 // Config is the full application configuration schema.
@@ -204,6 +206,12 @@ func normalizeService(svc Service) Service {
 	default:
 		svc.Template = ""
 	}
+	switch svc.InfraTemplate {
+	case "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process":
+		// valid
+	default:
+		svc.InfraTemplate = ""
+	}
 	if strings.TrimSpace(svc.SpanKind) == "" {
 		svc.SpanKind = "server"
 	}
@@ -224,6 +232,9 @@ func normalizeService(svc Service) Service {
 	}
 	if svc.Attributes == nil {
 		svc.Attributes = map[string]AttrValue{}
+	}
+	if svc.SpanAttrs == nil {
+		svc.SpanAttrs = map[string]AttrValue{}
 	}
 	return svc
 }

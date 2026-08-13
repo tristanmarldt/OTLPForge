@@ -69,6 +69,7 @@ type tui struct {
 
 	// bound form fields – service editor
 	fName            string
+	fTemplate        string
 	fSpanKind        string
 	fFailure         string
 	fInterval        string
@@ -231,6 +232,7 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 	m.editIdx = idx
 	if idx == -1 {
 		m.fName = ""
+		m.fTemplate = ""
 		m.fSpanKind = "server"
 		m.fFailure = "5"
 		m.fInterval = "5"
@@ -241,6 +243,7 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 	} else {
 		svc := m.cfg.Services[idx]
 		m.fName = svc.Name
+		m.fTemplate = svc.Template
 		m.fSpanKind = svc.SpanKind
 		m.fFailure = strconv.Itoa(svc.FailureRate)
 		m.fInterval = strconv.Itoa(svc.Interval)
@@ -266,6 +269,18 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 					}
 					return nil
 				}),
+			huh.NewSelect[string]().
+				Title("Template").
+				Description("Pre-fills OTel semantic convention attributes on each span").
+				Options(
+					huh.NewOption("None (generic)", ""),
+					huh.NewOption("HTTP server", "http-server"),
+					huh.NewOption("HTTP client", "http-client"),
+					huh.NewOption("Database (db.*)", "db"),
+					huh.NewOption("Messaging (Kafka/RabbitMQ/SQS)", "messaging"),
+					huh.NewOption("gRPC", "grpc"),
+				).
+				Value(&m.fTemplate),
 			huh.NewSelect[string]().
 				Title("Span kind").
 				Options(
@@ -348,6 +363,7 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 
 	svc := Service{
 		Name:        strings.TrimSpace(m.fName),
+		Template:    m.fTemplate,
 		SpanKind:    m.fSpanKind,
 		FailureRate: failRate,
 		Interval:    interval,
@@ -635,14 +651,19 @@ func (m *tui) renderService(i int, svc Service) string {
 		name = sBold.Render(name)
 	}
 
-	kind := sMuted.Render(svc.SpanKind)
+	var kindTag string
+	if svc.Template != "" {
+		kindTag = sMuted.Render("[" + svc.Template + "]")
+	} else {
+		kindTag = sMuted.Render(svc.SpanKind)
+	}
 	errRate := sMuted.Render(fmt.Sprintf("%d%% err", svc.FailureRate))
 	interval := sMuted.Render(fmt.Sprintf("%ds", svc.Interval))
 	var children string
 	if svc.ChildSpans > 0 {
 		children = "  " + sMuted.Render(fmt.Sprintf("+%d child", svc.ChildSpans))
 	}
-	row1 := fmt.Sprintf("%s%s %s  %s  %s  %s%s", cursor, dot, name, kind, errRate, interval, children)
+	row1 := fmt.Sprintf("%s%s %s  %s  %s  %s%s", cursor, dot, name, kindTag, errRate, interval, children)
 
 	// live signal counters
 	ss := m.status.Services[svc.Name]

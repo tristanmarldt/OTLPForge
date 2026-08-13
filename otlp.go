@@ -123,15 +123,17 @@ func toOTLPAttributes(values map[string]AttrValue) []*commonpb.KeyValue {
 }
 
 func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed bool) *tracepb.Span {
+	name, tmplAttrs := templateInfo(svc, failed)
 	span := &tracepb.Span{
 		TraceId:           traceID,
 		SpanId:            spanID,
-		Name:              svc.Name + ".request",
+		Name:              name,
 		Kind:              mapSpanKind(svc.SpanKind),
 		StartTimeUnixNano: uint64(start.UnixNano()),
 		EndTimeUnixNano:   uint64(end.UnixNano()),
 	}
 	applyFailure(span, failed)
+	span.Attributes = append(span.Attributes, tmplAttrs...)
 	return span
 }
 
@@ -142,11 +144,125 @@ func applyFailure(span *tracepb.Span, failed bool) {
 		return
 	}
 	span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR, Message: "simulated failure"}
-	span.Attributes = append(span.Attributes,
-		stringAttr("otgen.outcome", "failure"),
-		stringAttr("error.type", "http_error"),
-		intAttr("http.response.status_code", 500),
-	)
+	span.Attributes = append(span.Attributes, stringAttr("otgen.outcome", "failure"))
+}
+
+// ── template span attributes ──────────────────────────────────────────────────
+
+var (
+	httpMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
+	httpPaths   = []string{"/api/users", "/api/orders", "/api/products", "/api/auth", "/health", "/api/events", "/api/payments"}
+	httpHosts   = []string{"api.example.com", "payment.internal", "user-service.internal", "order-service.internal"}
+	dbSystems   = []string{"postgresql", "mysql", "mongodb", "redis", "cassandra"}
+	dbNamespaces  = []string{"orders", "users", "analytics", "inventory", "sessions"}
+	dbCollections = []string{"users", "orders", "products", "sessions", "events", "payments"}
+	dbOps         = []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
+	msgSystems    = []string{"kafka", "rabbitmq", "aws_sqs"}
+	msgTopics     = []string{"orders", "events", "notifications", "alerts", "payments"}
+	msgOps        = []string{"publish", "receive", "process", "settle"}
+	grpcSvcs      = []string{"UserService", "OrderService", "PaymentService", "InventoryService", "NotificationService"}
+	grpcMethods   = map[string][]string{
+		"UserService":         {"GetUser", "CreateUser", "UpdateUser", "ListUsers"},
+		"OrderService":        {"CreateOrder", "GetOrder", "ListOrders", "CancelOrder"},
+		"PaymentService":      {"ProcessPayment", "RefundPayment", "GetPaymentStatus"},
+		"InventoryService":    {"CheckStock", "ReserveStock", "ReleaseStock"},
+		"NotificationService": {"SendNotification", "GetNotificationStatus"},
+	}
+)
+
+// templateInfo returns the span name and extra semantic-convention attributes
+// for svc.Template, or a generic name and nil attrs when no template is set.
+func templateInfo(svc Service, failed bool) (string, []*commonpb.KeyValue) {
+	rnd := func(items []string) string { return items[mathrand.IntN(len(items))] }
+
+	switch svc.Template {
+	case "http-server":
+		method := rnd(httpMethods)
+		path := rnd(httpPaths)
+		status := int64(200)
+		if failed {
+			status = 500
+		}
+		return method + " " + path, []*commonpb.KeyValue{
+			stringAttr("http.request.method", method),
+			stringAttr("url.path", path),
+			stringAttr("url.scheme", "https"),
+			intAttr("http.response.status_code", status),
+			stringAttr("server.address", svc.Name+".service"),
+			stringAttr("network.protocol.version", "1.1"),
+		}
+
+	case "http-client":
+		method := rnd(httpMethods[:2]) // GET or POST
+		host := rnd(httpHosts)
+		path := rnd(httpPaths)
+		status := int64(200)
+		if failed {
+			status = 502
+		}
+		return method + " " + host, []*commonpb.KeyValue{
+			stringAttr("http.request.method", method),
+			stringAttr("server.address", host),
+			intAttr("server.port", 443),
+			stringAttr("url.full", "https://"+host+path),
+			intAttr("http.response.status_code", status),
+			stringAttr("network.protocol.version", "1.1"),
+		}
+
+	case "db":
+		system := rnd(dbSystems)
+		ns := rnd(dbNamespaces)
+		col := rnd(dbCollections)
+		op := rnd(dbOps)
+		port := int64(5432)
+		switch system {
+		case "mysql":
+			port = 3306
+		case "mongodb":
+			port = 27017
+		case "redis":
+			port = 6379
+		case "cassandra":
+			port = 9042
+		}
+		return op + " " + col, []*commonpb.KeyValue{
+			stringAttr("db.system.name", system),
+			stringAttr("db.namespace", ns),
+			stringAttr("db.operation.name", op),
+			stringAttr("db.collection.name", col),
+			stringAttr("server.address", "db.internal"),
+			intAttr("server.port", port),
+		}
+
+	case "messaging":
+		system := rnd(msgSystems)
+		topic := rnd(msgTopics)
+		op := rnd(msgOps)
+		return topic + " " + op, []*commonpb.KeyValue{
+			stringAttr("messaging.system", system),
+			stringAttr("messaging.destination.name", topic),
+			stringAttr("messaging.operation.name", op),
+			stringAttr("messaging.message.id", randomHex(8)),
+			stringAttr("messaging.client_id", svc.Name+"-client"),
+		}
+
+	case "grpc":
+		grpcSvc := rnd(grpcSvcs)
+		method := rnd(grpcMethods[grpcSvc])
+		statusCode := int64(0) // OK
+		if failed {
+			statusCode = 13 // INTERNAL
+		}
+		return "/" + grpcSvc + "/" + method, []*commonpb.KeyValue{
+			stringAttr("rpc.system", "grpc"),
+			stringAttr("rpc.service", grpcSvc),
+			stringAttr("rpc.method", method),
+			intAttr("rpc.grpc.status_code", statusCode),
+		}
+	}
+
+	// no template → generic name
+	return svc.Name + ".request", nil
 }
 
 func mapSpanKind(value string) tracepb.Span_SpanKind {

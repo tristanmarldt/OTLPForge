@@ -101,12 +101,13 @@ func doubleAttrVal(v float64) AttrValue { return AttrValue{Type: "double", Doubl
 // Service defines a named synthetic service to emit OTLP signals for.
 type Service struct {
 	Name        string               `json:"name"`
-	SpanKind    string               `json:"spanKind"`    // server|client|internal|producer|consumer
-	FailureRate int                  `json:"failureRate"` // 0–100 %
-	Interval    int                  `json:"interval"`    // seconds between sends, minimum 1
-	ChildSpans  int                  `json:"childSpans"`  // additional client spans under the root, 0–10
-	Signals     []string             `json:"signals"`     // "spans","metrics","logs"; empty = all three
-	Attributes  map[string]AttrValue `json:"attributes"`  // service.name is always added automatically
+	Template    string               `json:"template,omitempty"` // "", "http-server", "http-client", "db", "messaging", "grpc"
+	SpanKind    string               `json:"spanKind"`            // server|client|internal|producer|consumer
+	FailureRate int                  `json:"failureRate"`         // 0–100 %
+	Interval    int                  `json:"interval"`            // seconds between sends, minimum 1
+	ChildSpans  int                  `json:"childSpans"`          // additional client spans under the root, 0–10
+	Signals     []string             `json:"signals"`             // "spans","metrics","logs"; empty = all three
+	Attributes  map[string]AttrValue `json:"attributes"`          // service.name is always added automatically
 	Enabled     bool                 `json:"enabled"`
 }
 
@@ -197,6 +198,12 @@ func defaultConfig() Config {
 
 func normalizeService(svc Service) Service {
 	svc.Name = strings.TrimSpace(svc.Name)
+	switch svc.Template {
+	case "", "http-server", "http-client", "db", "messaging", "grpc":
+		// valid
+	default:
+		svc.Template = ""
+	}
 	if strings.TrimSpace(svc.SpanKind) == "" {
 		svc.SpanKind = "server"
 	}

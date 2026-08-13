@@ -85,6 +85,7 @@ type tui struct {
 	// bound form fields – global settings
 	gEndpoint string
 	gToken    string
+	gAttrs    string
 
 	flash    string
 	flashErr bool
@@ -547,6 +548,7 @@ func (m *tui) commitSpanAttrs() (tea.Model, tea.Cmd) {
 func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 	m.gEndpoint = m.cfg.Endpoint
 	m.gToken = ""
+	m.gAttrs = attrsToText(m.cfg.Attributes)
 
 	tokenDesc := "Leave blank to keep current token"
 	if !m.cfg.hasToken() {
@@ -565,6 +567,13 @@ func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 				Password(true).
 				Value(&m.gToken),
 		),
+		huh.NewGroup(
+			huh.NewText().
+				Title("Global resource attributes").
+				Description("Merged into every service at lowest precedence · key=value per line · esc: cancel").
+				Lines(10).
+				Value(&m.gAttrs),
+		),
 	).WithWidth(m.formWidth())
 
 	m.screen = screenGlobal
@@ -580,6 +589,7 @@ func (m *tui) commitGlobal() (tea.Model, tea.Cmd) {
 	if tok := strings.TrimSpace(m.gToken); tok != "" {
 		cfg.Token = tok
 	}
+	cfg.Attributes = parseAttrs(m.gAttrs)
 
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
@@ -740,7 +750,11 @@ func (m *tui) renderHeader() string {
 	} else {
 		ep = sMuted.Render(ep)
 	}
-	line2 := "  " + ep
+	var globalAttrHint string
+	if n := len(m.cfg.Attributes); n > 0 {
+		globalAttrHint = "  " + sMuted.Render(fmt.Sprintf("(%d global attr)", n))
+	}
+	line2 := "  " + ep + globalAttrHint
 
 	sep := sMuted.Render(strings.Repeat("─", min(m.width, 72)))
 	return line1 + "\n" + line2 + "\n" + sep

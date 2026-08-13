@@ -115,9 +115,10 @@ type Service struct {
 
 // Config is the full application configuration schema.
 type Config struct {
-	Endpoint string    `json:"endpoint"`
-	Token    string    `json:"token"`
-	Services []Service `json:"services"`
+	Endpoint   string               `json:"endpoint"`
+	Token      string               `json:"token"`
+	Attributes map[string]AttrValue `json:"attributes,omitempty"` // global resource attrs merged into every service (lowest precedence)
+	Services   []Service            `json:"services"`
 }
 
 // SignalStatus tracks send state for one signal kind within a service.
@@ -241,6 +242,9 @@ func normalizeService(svc Service) Service {
 }
 
 func normalizeConfig(cfg Config) Config {
+	if cfg.Attributes == nil {
+		cfg.Attributes = map[string]AttrValue{}
+	}
 	for i, svc := range cfg.Services {
 		cfg.Services[i] = normalizeService(svc)
 	}

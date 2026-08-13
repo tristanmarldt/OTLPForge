@@ -21,7 +21,7 @@ import (
 
 func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 	now := time.Now()
-	resource := &resourcepb.Resource{Attributes: svcAttributes(svc)}
+	resource := &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)}
 	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
 
 	switch kind {
@@ -95,16 +95,23 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 }
 
 // svcAttributes builds the resource attribute list for a service.
-// Precedence: service.name (fixed) > svc.Attributes (user) > infraDefaults (template).
-func svcAttributes(svc Service) []*commonpb.KeyValue {
-	merged := infraDefaults(svc)
-	if merged == nil {
-		merged = make(map[string]AttrValue, len(svc.Attributes)+1)
+// Precedence (high → low): service.name > svc.Attributes > infraDefaults > cfg.Attributes (global).
+func svcAttributes(cfg Config, svc Service) []*commonpb.KeyValue {
+	merged := make(map[string]AttrValue, len(cfg.Attributes)+len(svc.Attributes)+8)
+	// 1. global attrs (lowest priority)
+	for k, v := range cfg.Attributes {
+		merged[k] = v
 	}
+	// 2. infra template defaults
+	for k, v := range infraDefaults(svc) {
+		merged[k] = v
+	}
+	// 3. per-service resource attrs
 	for k, v := range svc.Attributes {
 		merged[k] = v
 	}
-	merged["service.name"] = strAttrVal(svc.Name) // always wins
+	// 4. service.name always wins
+	merged["service.name"] = strAttrVal(svc.Name)
 	return toOTLPAttributes(merged)
 }
 

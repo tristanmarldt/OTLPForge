@@ -57,7 +57,7 @@ func (a *AttrValue) UnmarshalJSON(b []byte) error {
 	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		// JSON number: integer if no '.', 'e', or 'E'; double otherwise.
 		raw := string(b)
-		if !containsAny(raw, '.', 'e', 'E') {
+		if !strings.ContainsAny(raw, ".eE") {
 			var iv int64
 			if err := json.Unmarshal(b, &iv); err != nil {
 				return err
@@ -81,21 +81,10 @@ func (a *AttrValue) UnmarshalJSON(b []byte) error {
 	}
 }
 
-func containsAny(s string, chars ...byte) bool {
-	for _, c := range chars {
-		for i := 0; i < len(s); i++ {
-			if s[i] == c {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // Convenience constructors for the four OTel scalar attribute types.
-func strAttrVal(v string) AttrValue    { return AttrValue{Type: "string", Str: v} }
-func boolAttrVal(v bool) AttrValue     { return AttrValue{Type: "bool", Bool: v} }
-func intAttrVal(v int64) AttrValue     { return AttrValue{Type: "int", Int: v} }
+func strAttrVal(v string) AttrValue     { return AttrValue{Type: "string", Str: v} }
+func boolAttrVal(v bool) AttrValue      { return AttrValue{Type: "bool", Bool: v} }
+func intAttrVal(v int64) AttrValue      { return AttrValue{Type: "int", Int: v} }
 func doubleAttrVal(v float64) AttrValue { return AttrValue{Type: "double", Double: v} }
 
 // Service defines a named synthetic service to emit OTLP signals for.
@@ -123,9 +112,8 @@ type Config struct {
 
 // SignalStatus tracks send state for one signal kind within a service.
 type SignalStatus struct {
-	LastSentAt string `json:"lastSentAt,omitempty"`
-	LastError  string `json:"lastError,omitempty"`
-	SentCount  uint64 `json:"sentCount"`
+	LastError string `json:"lastError,omitempty"`
+	SentCount uint64 `json:"sentCount"`
 }
 
 // ServiceStatus groups signal statuses for one service.

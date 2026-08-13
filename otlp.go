@@ -26,8 +26,8 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 
 	switch kind {
 	case signalSpans:
-		traceID := mustDecodeHex(randomHex(16), 16)
-		rootID := mustDecodeHex(randomHex(8), 8)
+		traceID := randomBytes(16)
+		rootID := randomBytes(8)
 		failed := mathrand.IntN(100) < svc.FailureRate
 		rootDur := randomRootDuration()
 		rootEnd := now.Add(rootDur)
@@ -36,7 +36,7 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 		spans := []*tracepb.Span{root}
 		offset := 5 * time.Millisecond
 		for i := 0; i < svc.ChildSpans; i++ {
-			childID := mustDecodeHex(randomHex(8), 8)
+			childID := randomBytes(8)
 			childDur := randomChildDuration()
 			childStart := now.Add(offset)
 			childEnd := childStart.Add(childDur)
@@ -187,15 +187,15 @@ func infraDefaults(svc Service) map[string]AttrValue {
 
 	case "ecs":
 		return map[string]AttrValue{
-			"aws.ecs.cluster.arn":   strAttrVal("arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster"),
-			"aws.ecs.task.arn":      strAttrVal("arn:aws:ecs:us-east-1:123456789012:task/my-cluster/abcdef1234567890abcdef12"),
-			"aws.ecs.task.family":   strAttrVal(name),
+			"aws.ecs.cluster.arn":    strAttrVal("arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster"),
+			"aws.ecs.task.arn":       strAttrVal("arn:aws:ecs:us-east-1:123456789012:task/my-cluster/abcdef1234567890abcdef12"),
+			"aws.ecs.task.family":    strAttrVal(name),
 			"aws.ecs.container.name": strAttrVal(name),
-			"aws.ecs.container.arn": strAttrVal("arn:aws:ecs:us-east-1:123456789012:container/my-cluster/abcdef1234567890abcdef12/a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
-			"cloud.provider":        strAttrVal("aws"),
-			"cloud.platform":        strAttrVal("aws_ecs"),
-			"cloud.region":          strAttrVal("us-east-1"),
-			"cloud.account.id":      strAttrVal("123456789012"),
+			"aws.ecs.container.arn":  strAttrVal("arn:aws:ecs:us-east-1:123456789012:container/my-cluster/abcdef1234567890abcdef12/a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+			"cloud.provider":         strAttrVal("aws"),
+			"cloud.platform":         strAttrVal("aws_ecs"),
+			"cloud.region":           strAttrVal("us-east-1"),
+			"cloud.account.id":       strAttrVal("123456789012"),
 		}
 
 	case "host":
@@ -219,13 +219,13 @@ func infraDefaults(svc Service) map[string]AttrValue {
 
 	case "lambda":
 		return map[string]AttrValue{
-			"cloud.provider":  strAttrVal("aws"),
-			"cloud.platform":  strAttrVal("aws_lambda"),
-			"cloud.region":    strAttrVal("us-east-1"),
+			"cloud.provider":   strAttrVal("aws"),
+			"cloud.platform":   strAttrVal("aws_lambda"),
+			"cloud.region":     strAttrVal("us-east-1"),
 			"cloud.account.id": strAttrVal("123456789012"),
-			"faas.name":       strAttrVal(name),
-			"faas.version":    strAttrVal("$LATEST"),
-			"faas.max_memory": intAttrVal(512),
+			"faas.name":        strAttrVal(name),
+			"faas.version":     strAttrVal("$LATEST"),
+			"faas.max_memory":  intAttrVal(512),
 		}
 
 	case "cloudfoundry":
@@ -272,22 +272,22 @@ func infraDefaults(svc Service) map[string]AttrValue {
 
 	case "azure-functions":
 		return map[string]AttrValue{
-			"cloud.provider":  strAttrVal("azure"),
-			"cloud.platform":  strAttrVal("azure_functions"),
-			"cloud.region":    strAttrVal("westeurope"),
+			"cloud.provider":   strAttrVal("azure"),
+			"cloud.platform":   strAttrVal("azure_functions"),
+			"cloud.region":     strAttrVal("westeurope"),
 			"cloud.account.id": strAttrVal("12345678-1234-1234-1234-123456789012"),
-			"faas.name":       strAttrVal(name),
-			"faas.version":    strAttrVal("1.0.0"),
+			"faas.name":        strAttrVal(name),
+			"faas.version":     strAttrVal("1.0.0"),
 		}
 
 	case "gcp-functions":
 		return map[string]AttrValue{
-			"cloud.provider":  strAttrVal("gcp"),
-			"cloud.platform":  strAttrVal("gcp_cloud_functions"),
-			"cloud.region":    strAttrVal("europe-west1"),
+			"cloud.provider":   strAttrVal("gcp"),
+			"cloud.platform":   strAttrVal("gcp_cloud_functions"),
+			"cloud.region":     strAttrVal("europe-west1"),
 			"cloud.account.id": strAttrVal("my-gcp-project"),
-			"faas.name":       strAttrVal(name),
-			"faas.version":    strAttrVal("1"),
+			"faas.name":        strAttrVal(name),
+			"faas.version":     strAttrVal("1"),
 		}
 
 	case "azure-container-apps":
@@ -352,10 +352,10 @@ func applyFailure(span *tracepb.Span, failed bool) {
 // ── template span attributes ──────────────────────────────────────────────────
 
 var (
-	httpMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
-	httpPaths   = []string{"/api/users", "/api/orders", "/api/products", "/api/auth", "/health", "/api/events", "/api/payments"}
-	httpHosts   = []string{"api.example.com", "payment.internal", "user-service.internal", "order-service.internal"}
-	dbSystems   = []string{"postgresql", "mysql", "mongodb", "redis", "cassandra"}
+	httpMethods   = []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
+	httpPaths     = []string{"/api/users", "/api/orders", "/api/products", "/api/auth", "/health", "/api/events", "/api/payments"}
+	httpHosts     = []string{"api.example.com", "payment.internal", "user-service.internal", "order-service.internal"}
+	dbSystems     = []string{"postgresql", "mysql", "mongodb", "redis", "cassandra"}
 	dbNamespaces  = []string{"orders", "users", "analytics", "inventory", "sessions"}
 	dbCollections = []string{"users", "orders", "products", "sessions", "events", "payments"}
 	dbOps         = []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
@@ -584,21 +584,15 @@ func newChildSpan(svcName string, traceID, spanID, parentID []byte, start, end t
 	}
 }
 
-func mustDecodeHex(value string, byteLen int) []byte {
-	b, err := hex.DecodeString(value)
-	if err != nil || len(b) != byteLen {
-		return make([]byte, byteLen)
-	}
-	return b
-}
-
-func randomHex(byteLen int) string {
+func randomBytes(byteLen int) []byte {
 	buf := make([]byte, byteLen)
 	if _, err := rand.Read(buf); err != nil {
-		return strings.Repeat("0", byteLen*2)
+		clear(buf)
 	}
-	return hex.EncodeToString(buf)
+	return buf
 }
+
+func randomHex(byteLen int) string { return hex.EncodeToString(randomBytes(byteLen)) }
 
 func stringAttr(key, value string) *commonpb.KeyValue {
 	return &commonpb.KeyValue{Key: key, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}}}

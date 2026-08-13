@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func testTUI(t *testing.T) *tui {
@@ -41,46 +43,76 @@ func TestUntouchedTemplateAttrsAreNotPersisted(t *testing.T) {
 	}
 }
 
-// TestTemplateSwitchReseedsAttrs verifies that changing the infrastructure
-// template refreshes the attribute editor instead of leaving the previous
-// template's values behind.
-func TestTemplateSwitchReseedsAttrs(t *testing.T) {
+func TestServiceTabCompletionWaitsForSave(t *testing.T) {
 	m := testTUI(t)
 	m.loadServiceFields(0)
+	m.screen, m.tabActive = screenServiceEdit, false
+	m.fFailure = "25"
+	m.form = m.makeServiceTabForm(0)
 
-	m.fInfraTemplate = "host"
-	m.syncTemplateSeeds()
+	m.commitForm()
 
-	got := parseAttrs(m.fAttrs)
-	for k := range got {
-		if strings.HasPrefix(k, "k8s.") {
-			t.Errorf("stale attribute %q survived the switch to the host template", k)
-		}
-	}
-	if _, ok := got["host.name"]; !ok {
-		t.Errorf("host template attrs were not seeded, got %v", got)
-	}
-	if svc := m.buildServiceFromFields(); len(svc.Attributes) != 0 {
-		t.Errorf("re-seeded template attrs persisted as overrides: %v", svc.Attributes)
+	if got := m.app.GetConfig().Services[0].FailureRate; got != 5 {
+		t.Fatalf("tab completion saved failure rate %d before s, want 5", got)
 	}
 	if !m.hasUnsavedChanges() {
-		t.Error("template change should count as an unsaved change")
+		t.Fatal("tab completion should leave unsaved changes in the selector")
 	}
 }
 
-// TestManualAttrEditsSurviveTemplateSwitch ensures a hand-written attribute set
-// is never silently replaced by template defaults.
-func TestManualAttrEditsSurviveTemplateSwitch(t *testing.T) {
+func TestNewServiceOpensSettings(t *testing.T) {
+	m := testTUI(t)
+	m.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+
+	if m.screen != screenServiceEdit || m.tabActive || m.form == nil {
+		t.Fatalf("new service did not open the Settings form: screen=%v tabActive=%v form=%v", m.screen, m.tabActive, m.form != nil)
+	}
+	if m.fName != "" {
+		t.Fatalf("new service name = %q, want blank", m.fName)
+	}
+}
+
+func TestHelpFitsStandardTerminal(t *testing.T) {
+	m := testTUI(t)
+	m.width, m.height, m.screen = 80, 24, screenHelp
+	if got := strings.Count(m.View(), "\n") + 1; got > m.height {
+		t.Fatalf("help renders %d rows in a %d-row terminal", got, m.height)
+	}
+}
+
+func TestSettingsSummaryLeavesEnabledToOverview(t *testing.T) {
+	m := testTUI(t)
+	if got := m.serviceTabSummaries()[0]; strings.Contains(got, "enabled") || strings.Contains(got, "disabled") {
+		t.Fatalf("Settings summary duplicates overview toggle: %q", got)
+	}
+}
+
+func TestGlobalFormLoadsSavedTokenForEditing(t *testing.T) {
+	m := testTUI(t)
+	m.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	if m.gToken != m.cfg.Token {
+		t.Fatalf("global token = %q, want saved token loaded for editing", m.gToken)
+	}
+}
+
+func TestGlobalFormCanClearSavedToken(t *testing.T) {
+	m := testTUI(t)
+	m.updateList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m.gToken = ""
+	m.commitGlobal()
+
+	if got := m.app.GetConfig().Token; got != "" {
+		t.Fatalf("saved token = %q after clearing the field", got)
+	}
+}
+
+func TestAttributeOverridesSurviveTemplateSwitch(t *testing.T) {
 	m := testTUI(t)
 	m.loadServiceFields(0)
 
 	m.fAttrs = "my.custom=1\nmy.flag=true"
 	m.fInfraTemplate = "ecs"
-	m.syncTemplateSeeds()
 
-	if !strings.Contains(m.fAttrs, "my.custom=1") {
-		t.Fatalf("manual edits were overwritten by the template: %q", m.fAttrs)
-	}
 	svc := m.buildServiceFromFields()
 	if len(svc.Attributes) != 2 {
 		t.Fatalf("expected 2 persisted attrs, got %v", svc.Attributes)
@@ -118,8 +150,8 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 		lastOpt  string
 		firstOpt string
 	}{
-		{1, "gRPC", "None (generic)"},
-		{2, "PaaS · Cloud Foundry / Tanzu", "Kubernetes · vanilla"},
+		{2, "gRPC", "None (generic)"},
+		{3, "PaaS · Cloud Foundry / Tanzu", "Kubernetes · vanilla"},
 	}
 
 	m := testTUI(t)
@@ -164,6 +196,25 @@ func TestEditorTabsFitStandardTerminal(t *testing.T) {
 	m.tabActive = true
 	if got := strings.Count(m.View(), "\n") + 1; got > rows {
 		t.Errorf("tab selector renders %d rows, exceeding a %d-row terminal", got, rows)
+	}
+
+	m.screen = screenGlobal
+	m.form = m.makeGlobalForm()
+	m.form.Init()
+	if got := strings.Count(m.View(), "\n") + 1; got > rows {
+		t.Errorf("global form renders %d rows, exceeding a %d-row terminal", got, rows)
+	}
+}
+
+func TestCtrlRMovesToNextTab(t *testing.T) {
+	m := testTUI(t)
+	m.loadServiceFields(0)
+	m.screen, m.tabActive, m.editTab = screenServiceEdit, false, 0
+	m.openServiceTab(0)
+
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if m.editTab != 1 {
+		t.Fatalf("ctrl+r moved to tab %d, want 1", m.editTab)
 	}
 }
 

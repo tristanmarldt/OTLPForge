@@ -60,24 +60,7 @@ const (
 	screenHelp
 )
 
-// editMode determines what happens when a service-editor tab is completed.
-type editMode int
-
-const (
-	// modeQuick: opened with 1-5 from the list — completing saves and returns
-	// straight to the list.
-	modeQuick editMode = iota
-	// modeSelector: opened from the tab selector — completing saves and returns
-	// to the selector so more tabs can be edited.
-	modeSelector
-	// modeWizard: new service — completing advances to the next tab; the last
-	// tab saves.
-	modeWizard
-)
-
-var serviceTabNames = []string{"Settings", "Span template", "Infra template", "Resource attrs", "Span attrs"}
-
-var globalTabNames = []string{"Connection", "Global attributes"}
+var serviceTabNames = []string{"Settings", "Signals", "Span template", "Infra template", "Resource attrs", "Span attrs"}
 
 // ── model ─────────────────────────────────────────────────────────────────────
 
@@ -96,10 +79,9 @@ type tui struct {
 	form *huh.Form
 
 	// service editor state
-	editIdx   int  // index in cfg.Services; -1 = new service
-	editTab   int  // active tab (0–4)
-	tabActive bool // true = tab selector focused; false = huh form focused
-	mode      editMode
+	editIdx   int     // index in cfg.Services; -1 = new service
+	editTab   int     // active tab
+	tabActive bool    // true = tab selector focused; false = huh form focused
 	origSvc   Service // snapshot used for unsaved-change detection
 
 	// bound form fields – service editor
@@ -115,21 +97,13 @@ type tui struct {
 	fAttrs         string
 	fSpanAttrs     string
 
-	// The exact text auto-seeded from a template. When the textarea still
-	// matches its seed the value is considered "untouched", so it is saved as
-	// an empty map and the service keeps following the template.
-	fAttrsSeed     string
-	fSpanAttrsSeed string
-
 	fDeleteConfirmed  bool
 	fDiscardConfirmed bool
 
 	// global config state
-	globalIdx    int
-	globalActive bool // true = global selector focused
-	gEndpoint    string
-	gToken       string
-	gAttrs       string
+	gEndpoint string
+	gToken    string
+	gAttrs    string
 
 	testing bool
 
@@ -192,9 +166,6 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForm(msg)
 
 	case screenGlobal:
-		if m.globalActive {
-			return m.updateGlobalSelector(msg)
-		}
 		return m.updateForm(msg)
 
 	case screenList:
@@ -221,20 +192,10 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if k.Type == tea.KeyEsc {
 			return m.leaveForm()
 		}
-		// Switch tabs without leaving the form.
-		//
-		// ctrl+<digit> is deliberately not used: terminals cannot transmit it
-		// (ctrl+1 sends nothing, ctrl+3 arrives as Esc) and bubbletea has no
-		// key for it. ctrl+o and ctrl+r are among the few free letters — huh
-		// and bubbles between them claim ctrl+a/b/c/d/e/f/h/j/k/m/n/p/t/u/v/w,
-		// ctrl+q and ctrl+s are flow control, and ctrl+z suspends.
-		if tabs := m.currentTabs(); tabs != nil {
-			switch k.String() {
-			case "ctrl+o":
-				return m.switchTab((m.currentTab() + 1) % len(tabs))
-			case "ctrl+r":
-				return m.switchTab((m.currentTab() - 1 + len(tabs)) % len(tabs))
-			}
+		if m.screen == screenServiceEdit && k.String() == "ctrl+r" {
+			m.editTab = (m.editTab + 1) % len(serviceTabNames)
+			m.openServiceTab(m.editTab)
+			return m, m.form.Init()
 		}
 	}
 
@@ -251,38 +212,6 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// currentTabs returns the tab set of the screen currently showing a form,
-// or nil when the screen is not tabbed.
-func (m *tui) currentTabs() []string {
-	switch m.screen {
-	case screenServiceEdit:
-		return serviceTabNames
-	case screenGlobal:
-		return globalTabNames
-	}
-	return nil
-}
-
-func (m *tui) currentTab() int {
-	if m.screen == screenGlobal {
-		return m.globalIdx
-	}
-	return m.editTab
-}
-
-// switchTab jumps straight to another tab of the open editor, keeping the
-// field values entered so far.
-func (m *tui) switchTab(idx int) (tea.Model, tea.Cmd) {
-	if m.screen == screenGlobal {
-		m.globalIdx = idx
-		m.form = m.makeGlobalTabForm(idx)
-		return m, m.form.Init()
-	}
-	m.editTab = idx
-	m.openServiceTab(idx)
-	return m, m.form.Init()
-}
-
 // leaveForm handles Esc / abort out of an open form.
 func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
 	switch m.screen {
@@ -290,7 +219,7 @@ func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
 		m.tabActive = true
 		m.form = nil
 	case screenGlobal:
-		m.globalActive = true
+		m.screen = screenList
 		m.form = nil
 	default:
 		m.screen = screenList
@@ -302,22 +231,11 @@ func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
 func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenServiceEdit:
-		switch m.mode {
-		case modeWizard:
-			if m.editTab < len(serviceTabNames)-1 {
-				m.editTab++
-				m.openServiceTab(m.editTab)
-				return m, m.form.Init()
-			}
-			return m.commitService(true)
-		case modeSelector:
-			// Save immediately, then return to the selector for further edits.
-			return m.commitService(false)
-		default: // modeQuick
-			return m.commitService(true)
-		}
+		m.tabActive = true
+		m.form = nil
+		return m, nil
 	case screenGlobal:
-		return m.commitGlobalTab()
+		return m.commitGlobal()
 	case screenConfirmDelete:
 		return m.commitDelete()
 	case screenConfirmDiscard:
@@ -350,9 +268,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "n":
-		// New service: guided walk through every tab.
 		m.loadServiceFields(-1)
-		m.mode = modeWizard
 		m.tabActive = false
 		m.editTab = 0
 		m.screen = screenServiceEdit
@@ -363,24 +279,11 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Existing service: open the tab selector.
 		if len(svcs) > 0 {
 			m.loadServiceFields(m.cursor)
-			m.mode = modeSelector
 			m.tabActive = true
 			m.editTab = 0
 			m.form = nil
 			m.screen = screenServiceEdit
 			return m, nil
-		}
-
-	case "1", "2", "3", "4", "5":
-		// Jump straight into one tab; completing it saves and returns here.
-		if len(svcs) > 0 {
-			m.loadServiceFields(m.cursor)
-			m.mode = modeQuick
-			m.tabActive = false
-			m.editTab = int(k.Runes[0] - '1')
-			m.screen = screenServiceEdit
-			m.openServiceTab(m.editTab)
-			return m, m.form.Init()
 		}
 
 	case "d":
@@ -405,11 +308,12 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, testConnCmd(m.app)
 
 	case "g":
-		m.globalActive = true
-		m.globalIdx = 0
-		m.form = nil
+		m.gEndpoint = m.cfg.Endpoint
+		m.gToken = m.cfg.Token
+		m.gAttrs = attrsToText(m.cfg.Attributes)
 		m.screen = screenGlobal
-		return m, nil
+		m.form = m.makeGlobalForm()
+		return m, m.form.Init()
 
 	case "?":
 		m.screen = screenHelp
@@ -423,7 +327,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *tui) loadServiceFields(idx int) {
 	m.editIdx = idx
 	if idx == -1 {
-		m.fName = "otgen-"
+		m.fName = ""
 		m.fTemplate = ""
 		m.fInfraTemplate = ""
 		m.fSpanKind = "server"
@@ -433,9 +337,7 @@ func (m *tui) loadServiceFields(idx int) {
 		m.fSignals = []string{"logs", "metrics", "spans"}
 		m.fEnabled = true
 		m.fAttrs = ""
-		m.fAttrsSeed = ""
 		m.fSpanAttrs = ""
-		m.fSpanAttrsSeed = ""
 	} else {
 		svc := m.cfg.Services[idx]
 		m.fName = svc.Name
@@ -453,50 +355,13 @@ func (m *tui) loadServiceFields(idx int) {
 		}
 		m.fEnabled = svc.Enabled
 
-		// Attributes explicitly saved by the user are shown as-is (no seed, so
-		// they are always persisted). Otherwise the template defaults are shown
-		// and recorded as the seed, so leaving them untouched keeps the service
-		// following the template instead of baking the values in.
-		if len(svc.Attributes) > 0 {
-			m.fAttrs = attrsToText(svc.Attributes)
-			m.fAttrsSeed = ""
-		} else {
-			m.fAttrs = attrsToText(infraDefaults(svc))
-			m.fAttrsSeed = m.fAttrs
-		}
-		if len(svc.SpanAttrs) > 0 {
-			m.fSpanAttrs = attrsToText(svc.SpanAttrs)
-			m.fSpanAttrsSeed = ""
-		} else {
-			m.fSpanAttrs = attrsToText(templateDefaults(svc.Template))
-			m.fSpanAttrsSeed = m.fSpanAttrs
-		}
+		m.fAttrs = attrsToText(svc.Attributes)
+		m.fSpanAttrs = attrsToText(svc.SpanAttrs)
 	}
-	m.syncTemplateSeeds()
 	m.origSvc = m.buildServiceFromFields()
 }
 
-// syncTemplateSeeds refreshes the attribute textareas after a template change.
-// A textarea that still matches its previous seed is re-seeded from the new
-// template; one the user has edited is left alone.
-func (m *tui) syncTemplateSeeds() {
-	probe := Service{Name: strings.TrimSpace(m.fName), InfraTemplate: m.fInfraTemplate}
-	newSeed := attrsToText(infraDefaults(probe))
-	if strings.TrimSpace(m.fAttrs) == strings.TrimSpace(m.fAttrsSeed) {
-		m.fAttrs = newSeed
-	}
-	m.fAttrsSeed = newSeed
-
-	newSpanSeed := attrsToText(templateDefaults(m.fTemplate))
-	if strings.TrimSpace(m.fSpanAttrs) == strings.TrimSpace(m.fSpanAttrsSeed) {
-		m.fSpanAttrs = newSpanSeed
-	}
-	m.fSpanAttrsSeed = newSpanSeed
-}
-
 // buildServiceFromFields materialises the editor state into a Service.
-// Attribute maps are left empty when the textarea still matches its template
-// seed, so the service keeps tracking the template rather than freezing a copy.
 func (m *tui) buildServiceFromFields() Service {
 	failRate, _ := strconv.Atoi(strings.TrimSpace(m.fFailure))
 	interval, _ := strconv.Atoi(strings.TrimSpace(m.fInterval))
@@ -506,15 +371,6 @@ func (m *tui) buildServiceFromFields() Service {
 	sort.Strings(signals)
 	if len(signals) == 3 {
 		signals = nil // all three = store empty (= all enabled)
-	}
-
-	attrs := parseAttrs(m.fAttrs)
-	if m.fAttrsSeed != "" && strings.TrimSpace(m.fAttrs) == strings.TrimSpace(m.fAttrsSeed) {
-		attrs = map[string]AttrValue{}
-	}
-	spanAttrs := parseAttrs(m.fSpanAttrs)
-	if m.fSpanAttrsSeed != "" && strings.TrimSpace(m.fSpanAttrs) == strings.TrimSpace(m.fSpanAttrsSeed) {
-		spanAttrs = map[string]AttrValue{}
 	}
 
 	return normalizeService(Service{
@@ -527,8 +383,8 @@ func (m *tui) buildServiceFromFields() Service {
 		ChildSpans:    childSpans,
 		Signals:       signals,
 		Enabled:       m.fEnabled,
-		Attributes:    attrs,
-		SpanAttrs:     spanAttrs,
+		Attributes:    parseAttrs(m.fAttrs),
+		SpanAttrs:     parseAttrs(m.fSpanAttrs),
 	})
 }
 
@@ -539,11 +395,9 @@ func (m *tui) hasUnsavedChanges() bool {
 
 // ── service editor: forms ─────────────────────────────────────────────────────
 
-const attrTypeHint = "alt+enter new line · enter save · key=value per line · " +
-	"true/false→bool · 42→int · 3.14→double · \"42\"→string"
+const attrTypeHint = "key=value · bool/number auto-detected · quote strings"
 
 func (m *tui) openServiceTab(tabIdx int) {
-	m.syncTemplateSeeds()
 	m.form = m.makeServiceTabForm(tabIdx)
 }
 
@@ -551,10 +405,6 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
 	switch tabIdx {
 	case 0: // Settings
-		// Inline fields keep this tab inside a 24-row terminal. huh cannot
-		// scroll a form that overflows (see makeServiceTabForm case 1), so the
-		// whole group has to fit. Titles are padded to a common width so the
-		// values line up.
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
@@ -600,18 +450,36 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						}
 						return nil
 					}),
-				newChoiceField("spanKind", settingsLabel("Span kind"), &m.fSpanKind, spanKindOptions),
-				huh.NewConfirm().
-					Title(settingsLabel("Enabled")).
+				huh.NewSelect[string]().
+					Title(settingsLabel("Span kind")).
 					Inline(true).
-					Affirmative("Yes").
-					Negative("No").
-					Value(&m.fEnabled),
-				newSignalsField(settingsLabel("Signals"), &m.fSignals),
+					Options(
+						huh.NewOption("server", "server"),
+						huh.NewOption("client", "client"),
+						huh.NewOption("internal", "internal"),
+						huh.NewOption("producer", "producer"),
+						huh.NewOption("consumer", "consumer"),
+					).
+					Description("←/→ change").
+					Value(&m.fSpanKind),
 			),
 		).WithWidth(w)
 
-	case 1: // Span template
+	case 1: // Signals
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewMultiSelect[string]().
+					Title("Signals").
+					Options(
+						huh.NewOption("spans", "spans"),
+						huh.NewOption("metrics", "metrics"),
+						huh.NewOption("logs", "logs"),
+					).
+					Value(&m.fSignals),
+			),
+		).WithWidth(w)
+
+	case 2: // Span template
 		// No .Height() here: huh v1.0.0 pins viewport.YOffset to the selected
 		// index on every Update when a height is set, so the list scrolls under
 		// a stationary cursor. Each select gets its own tab instead, short
@@ -633,7 +501,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	case 2: // Infrastructure template
+	case 3: // Infrastructure template
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
@@ -662,31 +530,23 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	case 3: // Resource attrs
-		desc := attrTypeHint
-		if m.fAttrsSeed != "" && strings.TrimSpace(m.fAttrs) == strings.TrimSpace(m.fAttrsSeed) {
-			desc = "Showing " + templateLabel(m.fInfraTemplate) + " defaults — edit to override · " + attrTypeHint
-		}
+	case 4: // Resource attrs
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewText().
 					Title("Resource attributes").
-					Description(desc).
+					Description("Overrides only · " + attrTypeHint).
 					Lines(m.textLines()).
 					Value(&m.fAttrs),
 			),
 		).WithWidth(w)
 
-	default: // 4 — Span attrs
-		desc := attrTypeHint
-		if m.fSpanAttrsSeed != "" && strings.TrimSpace(m.fSpanAttrs) == strings.TrimSpace(m.fSpanAttrsSeed) {
-			desc = "Showing " + templateLabel(m.fTemplate) + " defaults — edit to override · " + attrTypeHint
-		}
+	default: // 5 — Span attrs
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewText().
 					Title("Span attribute overrides").
-					Description(desc).
+					Description("Overrides only · " + attrTypeHint).
 					Lines(m.textLines()).
 					Value(&m.fSpanAttrs),
 			),
@@ -703,15 +563,7 @@ func settingsLabel(s string) string {
 	return s
 }
 
-func templateLabel(t string) string {
-	if t == "" {
-		return "no-template"
-	}
-	return t
-}
-
-func (m *tui) commitService(returnToList bool) (tea.Model, tea.Cmd) {
-	m.syncTemplateSeeds()
+func (m *tui) commitService() (tea.Model, tea.Cmd) {
 	svc := m.buildServiceFromFields()
 
 	cfg := m.cfg
@@ -723,17 +575,18 @@ func (m *tui) commitService(returnToList bool) (tea.Model, tea.Cmd) {
 		services[m.editIdx] = svc
 	}
 	cfg.Services = services
+	cfg = normalizeConfig(cfg)
+	if err := validateConfig(cfg); err != nil {
+		m.setFlash("error: "+err.Error(), true)
+		m.tabActive = true
+		m.form = nil
+		return m, nil
+	}
 
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
-		// stay where we are so the user can correct the problem
-		if returnToList {
-			m.screen = screenList
-			m.form = nil
-		} else {
-			m.tabActive = true
-			m.form = nil
-		}
+		m.tabActive = true
+		m.form = nil
 		return m, nil
 	}
 
@@ -741,14 +594,9 @@ func (m *tui) commitService(returnToList bool) (tea.Model, tea.Cmd) {
 	m.origSvc = svc
 	m.setFlash("saved "+svc.Name, false)
 
-	if returnToList {
-		m.screen = screenList
-		m.form = nil
-		m.tabActive = false
-		return m, nil
-	}
-	m.tabActive = true
+	m.screen = screenList
 	m.form = nil
+	m.tabActive = false
 	return m, nil
 }
 
@@ -769,7 +617,7 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		return m.commitService(true)
+		return m.commitService()
 
 	case "up", "k", "left", "h":
 		if m.editTab > 0 {
@@ -781,7 +629,7 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTab++
 		}
 
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4", "5", "6":
 		m.editTab = int(k.Runes[0] - '1')
 		m.tabActive = false
 		m.openServiceTab(m.editTab)
@@ -797,74 +645,15 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // ── global config ─────────────────────────────────────────────────────────────
 
-func (m *tui) updateGlobalSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
-	k, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-	switch k.String() {
-	case "esc", "q":
-		m.screen = screenList
-		m.globalActive = false
-		return m, nil
-
-	case "up", "k", "left", "h":
-		if m.globalIdx > 0 {
-			m.globalIdx--
-		}
-
-	case "down", "j", "right", "l":
-		if m.globalIdx < len(globalTabNames)-1 {
-			m.globalIdx++
-		}
-
-	case "t":
-		if m.testing {
-			return m, nil
-		}
-		m.testing = true
-		m.setFlash("testing connection…", false)
-		return m, testConnCmd(m.app)
-
-	case "1", "2":
-		m.globalIdx = int(k.Runes[0] - '1')
-		m.globalActive = false
-		m.form = m.makeGlobalTabForm(m.globalIdx)
-		return m, m.form.Init()
-
-	case "enter", " ":
-		m.globalActive = false
-		m.form = m.makeGlobalTabForm(m.globalIdx)
-		return m, m.form.Init()
-	}
-	return m, nil
-}
-
-func (m *tui) makeGlobalTabForm(idx int) *huh.Form {
+func (m *tui) makeGlobalForm() *huh.Form {
 	w := m.formWidth()
-	if idx == 1 {
-		m.gAttrs = attrsToText(m.cfg.Attributes)
-		return huh.NewForm(
-			huh.NewGroup(
-				huh.NewText().
-					Title("Global resource attributes").
-					Description("Merged into every service, lowest precedence · " + attrTypeHint).
-					Lines(m.textLines()).
-					Value(&m.gAttrs),
-			),
-		).WithWidth(w)
-	}
-
-	m.gEndpoint = m.cfg.Endpoint
-	m.gToken = ""
-
 	endpointDesc := "e.g. https://xxx.live.dynatrace.com/api/v2/otlp"
 	if endpointFromEnv() {
 		endpointDesc = "⚠ OTGEN_ENDPOINT is set — it overrides this value at runtime"
 	}
-	tokenDesc := "Leave blank to keep the current token"
+	tokenDesc := "Edit or clear the saved token"
 	if !m.cfg.hasToken() {
-		tokenDesc = "No token configured yet"
+		tokenDesc = "Optional — leave blank if unused"
 	}
 	if tokenFromEnv() {
 		tokenDesc = "⚠ OTGEN_TOKEN is set — it overrides this value at runtime"
@@ -881,30 +670,28 @@ func (m *tui) makeGlobalTabForm(idx int) *huh.Form {
 				Description(tokenDesc).
 				Password(true).
 				Value(&m.gToken),
+			huh.NewText().
+				Title("Global resource attributes").
+				Description("Lowest precedence · "+attrTypeHint).
+				Lines(max(5, m.textLines()-6)).
+				Value(&m.gAttrs),
 		),
 	).WithWidth(w)
 }
 
-func (m *tui) commitGlobalTab() (tea.Model, tea.Cmd) {
+func (m *tui) commitGlobal() (tea.Model, tea.Cmd) {
 	cfg := m.cfg
-	label := "settings saved"
-	if m.globalIdx == 1 {
-		cfg.Attributes = parseAttrs(m.gAttrs)
-		label = "global attributes saved"
-	} else {
-		cfg.Endpoint = strings.TrimSpace(m.gEndpoint)
-		if tok := strings.TrimSpace(m.gToken); tok != "" {
-			cfg.Token = tok
-		}
-	}
+	cfg.Endpoint = strings.TrimSpace(m.gEndpoint)
+	cfg.Attributes = parseAttrs(m.gAttrs)
+	cfg.Token = strings.TrimSpace(m.gToken)
 
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
 	} else {
 		m.cfg = cfg
-		m.setFlash(label, false)
+		m.setFlash("settings saved", false)
 	}
-	m.globalActive = true
+	m.screen = screenList
 	m.form = nil
 	return m, nil
 }
@@ -1047,12 +834,10 @@ func (m *tui) View() string {
 		}
 
 	case screenGlobal:
-		if m.globalActive {
-			return m.globalSelectorView()
-		}
 		if m.form != nil {
-			return m.tabBar(globalTabNames, m.globalIdx) + "\n" + m.tabSwitchHint() + "\n" + m.form.View()
+			return "  " + sBold.Render("Global configuration") + "\n" + sHelp.Render("  esc cancel · enter save") + "\n" + m.form.View()
 		}
+
 	}
 	if m.form != nil && m.screen != screenList {
 		return m.form.View()
@@ -1106,11 +891,7 @@ func (m *tui) tabBar(names []string, active int) string {
 // tabSwitchHint is shown under the tab bar while a form is focused, so the
 // in-form switch keys are discoverable without opening the help overlay.
 func (m *tui) tabSwitchHint() string {
-	full := "  ctrl+o / ctrl+r  next / prev tab   ·   esc  tab list"
-	if lipgloss.Width(full) <= m.width {
-		return sHelp.Render(full)
-	}
-	return sHelp.Render("  ctrl+o next tab · esc tab list")
+	return sHelp.Render("  ctrl+r next tab · esc tab list")
 }
 
 // serviceSelectorView lists the editor tabs with a summary of each one.
@@ -1149,7 +930,7 @@ func (m *tui) serviceSelectorView() string {
 	}
 
 	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-5 open  ·  s save  ·  esc back"))
+	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-6 open  ·  s save  ·  esc back"))
 	rows = append(rows, sHelp.Render("  ~ inherited from template   ✎ your override"))
 	return strings.Join(rows, "\n")
 }
@@ -1164,17 +945,11 @@ func (m *tui) serviceTabSummaries() []string {
 	} else if len(m.fSignals) == 0 {
 		sigs = "no signals"
 	}
-	state := "enabled"
-	if !m.fEnabled {
-		state = "disabled"
-	}
-	settings := fmt.Sprintf("%s · every %ss · %s%% err · %s",
-		m.fSpanKind, strings.TrimSpace(m.fInterval), strings.TrimSpace(m.fFailure), sigs)
+	settings := fmt.Sprintf("%s · every %ss · %s%% err",
+		m.fSpanKind, strings.TrimSpace(m.fInterval), strings.TrimSpace(m.fFailure))
 	if n, _ := strconv.Atoi(strings.TrimSpace(m.fChildSpans)); n > 0 {
 		settings += fmt.Sprintf(" · +%d child", n)
 	}
-	settings += " · " + state
-
 	spanTmpl := m.fTemplate
 	if spanTmpl == "" {
 		spanTmpl = sMuted.Render("none — generic spans")
@@ -1186,133 +961,46 @@ func (m *tui) serviceTabSummaries() []string {
 
 	return []string{
 		settings,
+		sigs,
 		spanTmpl,
 		infraTmpl,
-		attrSummary(m.fAttrs, m.fAttrsSeed),
-		attrSummary(m.fSpanAttrs, m.fSpanAttrsSeed),
+		attrSummary(m.fAttrs, len(infraDefaults(Service{Name: strings.TrimSpace(m.fName), InfraTemplate: m.fInfraTemplate}))),
+		attrSummary(m.fSpanAttrs, len(templateDefaults(m.fTemplate))),
 	}
 }
 
-// attrSummary describes a textarea's contents and whether it is a template
-// default or a user override.
-func attrSummary(text, seed string) string {
+func attrSummary(text string, inherited int) string {
 	n := len(parseAttrs(text))
-	if n == 0 {
-		return sMuted.Render("none")
+	if n > 0 {
+		return fmt.Sprintf("✎ %d override", n)
 	}
-	if seed != "" && strings.TrimSpace(text) == strings.TrimSpace(seed) {
-		return fmt.Sprintf("~ %d from template", n)
+	if inherited > 0 {
+		return fmt.Sprintf("~ %d inherited", inherited)
 	}
-	return fmt.Sprintf("✎ %d custom", n)
-}
-
-func (m *tui) globalSelectorView() string {
-	var rows []string
-	rows = append(rows, m.tabBar(globalTabNames, m.globalIdx))
-	rows = append(rows, "  "+sBold.Render("Global configuration"), "")
-
-	ep := m.cfg.Endpoint
-	if ep == "" {
-		ep = "not configured"
-	}
-	if endpointFromEnv() {
-		ep = "OTGEN_ENDPOINT (env override active)"
-	}
-	tok := "not configured"
-	if m.cfg.hasToken() {
-		tok = "configured"
-	}
-	if tokenFromEnv() {
-		tok = "OTGEN_TOKEN (env override active)"
-	}
-	conn := truncate(ep, max(20, m.width-34)) + " · token " + tok
-
-	summaries := []string{conn, attrSummary(attrsToText(m.cfg.Attributes), "")}
-	for i, name := range globalTabNames {
-		line := fmt.Sprintf("%d %s", i+1, name)
-		pad := 20 - len([]rune(line))
-		if pad < 1 {
-			pad = 1
-		}
-		line += strings.Repeat(" ", pad) + summaries[i]
-		if i == m.globalIdx {
-			rows = append(rows, sPrimary.Render("  ▸ ")+sPrimaryBold.Render(line))
-		} else {
-			rows = append(rows, sMuted.Render("    "+line))
-		}
-	}
-
-	if m.flash != "" {
-		rows = append(rows, "")
-		if m.flashErr {
-			rows = append(rows, sError.Render("  ✗ "+truncate(m.flash, max(20, m.width-6))))
-		} else {
-			rows = append(rows, sSuccess.Render("  ✓ "+truncate(m.flash, max(20, m.width-6))))
-		}
-	}
-
-	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-2 open  ·  t test connection  ·  esc back"))
-	return strings.Join(rows, "\n")
+	return sMuted.Render("none")
 }
 
 func (m *tui) helpView() string {
-	type row struct{ key, desc string }
-	sections := []struct {
-		title string
-		rows  []row
-	}{
-		{"Service list", []row{
-			{"↑ ↓ / j k", "move between services"},
-			{"enter", "open the service editor (tab list)"},
-			{"1 – 5", "edit one tab directly, save on enter"},
-			{"n", "new service (guided through all tabs)"},
-			{"space", "enable / disable the service"},
-			{"d", "delete the service"},
-		}},
-		{"Generator", []row{
-			{"r", "start / stop sending"},
-			{"t", "send one test span and report the result"},
-		}},
-		{"Configuration", []row{
-			{"g", "global configuration (endpoint, token, attributes)"},
-			{"?", "this help"},
-			{"q", "quit (stops the generator)"},
-		}},
-		{"Editor — tab list", []row{
-			{"enter / 1-5", "open a tab"},
-			{"s", "save and return to the list"},
-			{"esc", "leave the editor (asks if unsaved)"},
-		}},
-		{"Editor — inside a tab", []row{
-			{"ctrl+o", "next tab, without leaving the form"},
-			{"ctrl+r", "previous tab"},
-			{"esc", "back to the tab list"},
-			{"space", "toggle a signal on the Settings tab"},
-			{"alt+enter", "new line inside an attribute textarea"},
-			{"/", "filter long template lists"},
-		}},
-		{"Attribute markers", []row{
-			{"~", "inherited from a template (or the global attributes)"},
-			{"✎", "overridden by hand for this service"},
-		}},
+	rows := []string{
+		"  " + sPrimaryBold.Render("otgen") + sMuted.Render("  keyboard reference"),
+		"  " + m.sepLine(),
+		"",
+		"  " + sBold.Render("Service list"),
+		sHelp.Render("    ↑↓/jk move · enter edit · n new"),
+		sHelp.Render("    space enable · d delete"),
+		sHelp.Render("    r run · t test · g config · q quit"),
+		"",
+		"  " + sBold.Render("Editor"),
+		sHelp.Render("    enter/1-6 open · s save · esc back"),
+		sHelp.Render("    ctrl+r next tab · x toggle signal"),
+		sHelp.Render("    / filter templates · alt+enter new line"),
+		"",
+		"  " + sBold.Render("Attributes"),
+		sHelp.Render("    ~ inherited · ✎ service override"),
+		"",
+		"  " + m.sepLine(),
+		sHelp.Render("  press any key to go back"),
 	}
-
-	var rows []string
-	rows = append(rows, "  "+sPrimaryBold.Render("otgen")+sMuted.Render("  keyboard reference"))
-	rows = append(rows, "  "+m.sepLine())
-	for _, sec := range sections {
-		rows = append(rows, "", "  "+sBold.Render(sec.title))
-		for _, r := range sec.rows {
-			pad := 14 - len([]rune(r.key))
-			if pad < 1 {
-				pad = 1
-			}
-			rows = append(rows, "    "+sPrimary.Render(r.key)+strings.Repeat(" ", pad)+sMuted.Render(r.desc))
-		}
-	}
-	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  press any key to go back"))
 	return strings.Join(rows, "\n")
 }
 
@@ -1455,10 +1143,11 @@ func (m *tui) renderService(i int, svc Service, expanded bool) string {
 	}
 
 	// Expanded: show the attributes that will actually be emitted.
-	resAttrs := svc.Attributes
+	resAttrs := map[string]AttrValue{}
+	mergeAttrs(resAttrs, infraDefaults(svc))
+	mergeAttrs(resAttrs, svc.Attributes)
 	resMark := "✎"
-	if len(resAttrs) == 0 {
-		resAttrs = infraDefaults(svc)
+	if len(svc.Attributes) == 0 {
 		resMark = "~"
 	}
 	if len(m.cfg.Attributes) > 0 {
@@ -1473,10 +1162,11 @@ func (m *tui) renderService(i int, svc Service, expanded bool) string {
 	}
 	lines = append(lines, m.attrLine("res ", resMark, resAttrs))
 
-	spanAttrs := svc.SpanAttrs
+	spanAttrs := map[string]AttrValue{}
+	mergeAttrs(spanAttrs, templateDefaults(svc.Template))
+	mergeAttrs(spanAttrs, svc.SpanAttrs)
 	spanMark := "✎"
-	if len(spanAttrs) == 0 {
-		spanAttrs = templateDefaults(svc.Template)
+	if len(svc.SpanAttrs) == 0 {
 		spanMark = "~"
 	}
 	lines = append(lines, m.attrLine("span", spanMark, spanAttrs))
@@ -1502,7 +1192,7 @@ func (m *tui) attrLine(label, mark string, attrs map[string]AttrValue) string {
 
 func (m *tui) renderHelp() string {
 	full := []string{
-		"n new", "↵ edit", "1-5 tab", "d delete", "␣ toggle",
+		"n new", "↵ edit", "d delete", "␣ toggle",
 		"r run/stop", "t test", "g config", "? help", "q quit",
 	}
 	medium := []string{"n new", "↵ edit", "r run/stop", "g config", "? help", "q quit"}

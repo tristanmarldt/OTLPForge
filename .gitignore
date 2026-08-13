@@ -1,4 +1,14 @@
 config.json
 otlpforge
 run-docker-local.sh
+resource_attributes.json
+
+# AI / editor internals
+.claude/
+CLAUDE.md
+rnd-ai-knowledgebase/
 .vscode/
+.DS_Store
+
+# Logs written by the TUI
+*.log

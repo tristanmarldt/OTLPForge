@@ -1,4 +1,11 @@
 .git
 .vscode
-otlpforge
+.claude
+.DS_Store
+CLAUDE.md
+rnd-ai-knowledgebase
+resource_attributes.json
 config.json
+otlpforge
+run-docker-local.sh
+*.log

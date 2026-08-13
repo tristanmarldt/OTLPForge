@@ -19,29 +19,23 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func buildPayload(cfg AppConfig, kind signalKind) ([]byte, error) {
+func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 	now := time.Now()
-	resource := &resourcepb.Resource{Attributes: toOTLPAttributes(cfg.ResourceAttributes)}
+	resource := &resourcepb.Resource{Attributes: svcAttributes(svc)}
 	scope := &commonpb.InstrumentationScope{Name: "otlpforge", Version: "1.0.0"}
 
 	switch kind {
 	case signalSpans:
 		traceID := mustDecodeHex(randomHex(16), 16)
-		rootSpanID := mustDecodeHex(randomHex(8), 8)
-		failed := mathrand.IntN(100) < cfg.SpanFailureRate
-		rootDuration := randomDuration(cfg.SpanMinDurationMs, cfg.SpanMaxDurationMs)
-		rootStart := now
-		rootEnd := now.Add(rootDuration)
-		spans := []*tracepb.Span{newRootSpan(cfg, traceID, rootSpanID, rootStart, rootEnd, failed)}
-		spans = append(spans, newChildSpans(cfg, traceID, rootSpanID, rootStart, rootEnd, failed)...)
-
+		spanID := mustDecodeHex(randomHex(8), 8)
+		failed := mathrand.IntN(100) < svc.FailureRate
+		dur := randomDuration()
+		end := now.Add(dur)
+		span := newSpan(svc, traceID, spanID, now, end, failed)
 		return proto.Marshal(&collectortracepb.ExportTraceServiceRequest{
 			ResourceSpans: []*tracepb.ResourceSpans{{
-				Resource: resource,
-				ScopeSpans: []*tracepb.ScopeSpans{{
-					Scope: scope,
-					Spans: spans,
-				}},
+				Resource:   resource,
+				ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: []*tracepb.Span{span}}},
 			}},
 		})
 	case signalMetrics:
@@ -51,7 +45,7 @@ func buildPayload(cfg AppConfig, kind signalKind) ([]byte, error) {
 				ScopeMetrics: []*metricspb.ScopeMetrics{{
 					Scope: scope,
 					Metrics: []*metricspb.Metric{{
-						Name: cfg.MetricName,
+						Name: svc.Name + ".requests.total",
 						Unit: "1",
 						Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
 							AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
@@ -75,7 +69,7 @@ func buildPayload(cfg AppConfig, kind signalKind) ([]byte, error) {
 						TimeUnixNano:   uint64(now.UnixNano()),
 						SeverityNumber: logspb.SeverityNumber_SEVERITY_NUMBER_INFO,
 						SeverityText:   "INFO",
-						Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: cfg.LogMessage}},
+						Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc.Name + " synthetic log"}},
 					}},
 				}},
 			}},
@@ -85,15 +79,79 @@ func buildPayload(cfg AppConfig, kind signalKind) ([]byte, error) {
 	}
 }
 
-func toOTLPAttributes(values map[string]string) []*commonpb.KeyValue {
+// svcAttributes builds the resource attribute list for a service, always
+// including service.name (which wins over any caller-supplied value).
+func svcAttributes(svc Service) []*commonpb.KeyValue {
+	merged := make(map[string]AttrValue, len(svc.Attributes)+1)
+	for k, v := range svc.Attributes {
+		merged[k] = v
+	}
+	merged["service.name"] = strAttrVal(svc.Name) // always wins
+	return toOTLPAttributes(merged)
+}
+
+func toOTLPAttributes(values map[string]AttrValue) []*commonpb.KeyValue {
 	attrs := make([]*commonpb.KeyValue, 0, len(values))
 	for k, v := range values {
-		attrs = append(attrs, &commonpb.KeyValue{
-			Key:   k,
-			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}},
-		})
+		switch v.Type {
+		case "bool":
+			attrs = append(attrs, boolAttr(k, v.Bool))
+		case "int":
+			attrs = append(attrs, intAttr(k, v.Int))
+		case "double":
+			attrs = append(attrs, doubleAttr(k, v.Double))
+		default:
+			attrs = append(attrs, stringAttr(k, v.Str))
+		}
 	}
 	return attrs
+}
+
+func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed bool) *tracepb.Span {
+	span := &tracepb.Span{
+		TraceId:           traceID,
+		SpanId:            spanID,
+		Name:              svc.Name + ".request",
+		Kind:              mapSpanKind(svc.SpanKind),
+		StartTimeUnixNano: uint64(start.UnixNano()),
+		EndTimeUnixNano:   uint64(end.UnixNano()),
+	}
+	applyFailure(span, failed)
+	return span
+}
+
+func applyFailure(span *tracepb.Span, failed bool) {
+	if !failed {
+		span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK}
+		span.Attributes = append(span.Attributes, stringAttr("otlpforge.outcome", "success"))
+		return
+	}
+	span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR, Message: "simulated failure"}
+	span.Attributes = append(span.Attributes,
+		stringAttr("otlpforge.outcome", "failure"),
+		stringAttr("error.type", "http_error"),
+		intAttr("http.response.status_code", 500),
+	)
+}
+
+func mapSpanKind(value string) tracepb.Span_SpanKind {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "server":
+		return tracepb.Span_SPAN_KIND_SERVER
+	case "client":
+		return tracepb.Span_SPAN_KIND_CLIENT
+	case "producer":
+		return tracepb.Span_SPAN_KIND_PRODUCER
+	case "consumer":
+		return tracepb.Span_SPAN_KIND_CONSUMER
+	default:
+		return tracepb.Span_SPAN_KIND_INTERNAL
+	}
+}
+
+// randomDuration returns a random span duration between 20 and 200 ms.
+func randomDuration() time.Duration {
+	return time.Duration(20+mathrand.IntN(181)) * time.Millisecond
 }
 
 func mustDecodeHex(value string, byteLen int) []byte {
@@ -112,122 +170,6 @@ func randomHex(byteLen int) string {
 	return hex.EncodeToString(buf)
 }
 
-func formatTokenHeader(headerName, token string) string {
-	if strings.EqualFold(headerName, "Authorization") && !strings.HasPrefix(strings.ToLower(token), "api-token ") {
-		return "Api-Token " + token
-	}
-	return token
-}
-
-func mapSpanKind(value string) tracepb.Span_SpanKind {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "server":
-		return tracepb.Span_SPAN_KIND_SERVER
-	case "client":
-		return tracepb.Span_SPAN_KIND_CLIENT
-	case "producer":
-		return tracepb.Span_SPAN_KIND_PRODUCER
-	case "consumer":
-		return tracepb.Span_SPAN_KIND_CONSUMER
-	default:
-		return tracepb.Span_SPAN_KIND_INTERNAL
-	}
-}
-
-func newRootSpan(cfg AppConfig, traceID, spanID []byte, start, end time.Time, failed bool) *tracepb.Span {
-	span := &tracepb.Span{
-		TraceId:           traceID,
-		SpanId:            spanID,
-		Name:              cfg.SpanName,
-		Kind:              mapSpanKind(cfg.SpanKind),
-		StartTimeUnixNano: uint64(start.UnixNano()),
-		EndTimeUnixNano:   uint64(end.UnixNano()),
-	}
-	applyFailure(span, cfg, failed)
-	return span
-}
-
-func newChildSpans(cfg AppConfig, traceID, parentSpanID []byte, rootStart, rootEnd time.Time, failed bool) []*tracepb.Span {
-	if cfg.SpanChildCount <= 0 {
-		return nil
-	}
-
-	children := make([]*tracepb.Span, 0, cfg.SpanChildCount)
-	total := rootEnd.Sub(rootStart)
-	step := total / time.Duration(cfg.SpanChildCount+1)
-	if step <= 0 {
-		step = time.Millisecond
-	}
-
-	for i := 0; i < cfg.SpanChildCount; i++ {
-		start := rootStart.Add(time.Duration(i+1)*step - step/2)
-		if start.Before(rootStart) {
-			start = rootStart
-		}
-		duration := randomDuration(cfg.SpanMinDurationMs/2, cfg.SpanMaxDurationMs/2)
-		end := start.Add(duration)
-		if end.After(rootEnd) {
-			end = rootEnd
-		}
-		child := &tracepb.Span{
-			TraceId:           traceID,
-			SpanId:            mustDecodeHex(randomHex(8), 8),
-			ParentSpanId:      parentSpanID,
-			Name:              fmt.Sprintf("%s.child.%d", cfg.SpanName, i+1),
-			Kind:              tracepb.Span_SPAN_KIND_INTERNAL,
-			StartTimeUnixNano: uint64(start.UnixNano()),
-			EndTimeUnixNano:   uint64(end.UnixNano()),
-		}
-		applyFailure(child, cfg, failed && i == cfg.SpanChildCount-1)
-		children = append(children, child)
-	}
-	return children
-}
-
-func applyFailure(span *tracepb.Span, cfg AppConfig, failed bool) {
-	if !failed {
-		span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK}
-		span.Attributes = append(span.Attributes, stringAttr("otlpforge.outcome", "success"))
-		return
-	}
-
-	span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR, Message: cfg.SpanFailureMessage}
-	span.Attributes = append(span.Attributes,
-		stringAttr("otlpforge.outcome", "failure"),
-		stringAttr("otlpforge.failure_mode", cfg.SpanFailureMode),
-	)
-
-	switch strings.ToLower(strings.TrimSpace(cfg.SpanFailureMode)) {
-	case "timeout":
-		span.Attributes = append(span.Attributes,
-			stringAttr("error.type", "timeout"),
-			boolAttr("timeout", true),
-		)
-	case "backend":
-		span.Attributes = append(span.Attributes,
-			stringAttr("error.type", "backend_error"),
-		)
-	default:
-		span.Attributes = append(span.Attributes,
-			stringAttr("error.type", "http_error"),
-			intAttr("http.response.status_code", int64(cfg.SpanFailureCode)),
-		)
-	}
-}
-
-func randomDuration(minMs, maxMs int) time.Duration {
-	if minMs <= 0 {
-		minMs = 1
-	}
-	if maxMs < minMs {
-		maxMs = minMs
-	}
-	if minMs == maxMs {
-		return time.Duration(minMs) * time.Millisecond
-	}
-	return time.Duration(minMs+mathrand.IntN(maxMs-minMs+1)) * time.Millisecond
-}
-
 func stringAttr(key, value string) *commonpb.KeyValue {
 	return &commonpb.KeyValue{Key: key, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: value}}}
 }
@@ -238,4 +180,8 @@ func intAttr(key string, value int64) *commonpb.KeyValue {
 
 func boolAttr(key string, value bool) *commonpb.KeyValue {
 	return &commonpb.KeyValue{Key: key, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: value}}}
+}
+
+func doubleAttr(key string, value float64) *commonpb.KeyValue {
+	return &commonpb.KeyValue{Key: key, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: value}}}
 }

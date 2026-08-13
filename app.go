@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +16,7 @@ import (
 
 type App struct {
 	mu          sync.RWMutex
-	cfg         AppConfig
+	cfg         Config
 	status      RuntimeStatus
 	runCancel   context.CancelFunc
 	configPath  string
@@ -28,7 +27,7 @@ func NewApp(configPath string, httpTimeout time.Duration) *App {
 	return &App{
 		cfg: defaultConfig(),
 		status: RuntimeStatus{
-			Signals: map[string]SignalStatus{},
+			Services: map[string]ServiceStatus{},
 		},
 		configPath:  configPath,
 		httpTimeout: httpTimeout,
@@ -50,15 +49,8 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
-	content, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		http.Error(w, "failed to load ui", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(content)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, "OTLPForge\n\nGET  /api/config   read config\nPOST /api/config   write config\nPOST /api/start    start sending\nPOST /api/stop     stop sending\nGET  /api/status   runtime status\n")
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -67,19 +59,18 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		a.mu.RLock()
 		effectiveCfg := a.cfg.runtimeConfig()
 		resp := map[string]any{
-			"config":              a.cfg.redacted(),
-			"effectiveConfig":     effectiveCfg.redacted(),
-			"status":              a.status,
-			"tokenConfigured":     effectiveCfg.hasToken(),
-			"endpointFromEnv":     endpointFromEnv(a.cfg),
-			"tokenFromEnv":        envTokenConfigured(),
-			"tokenHeaderFromEnv":  tokenHeaderFromEnv(a.cfg),
+			"config":          a.cfg.redacted(),
+			"effectiveConfig": effectiveCfg.redacted(),
+			"status":          a.status,
+			"tokenConfigured": effectiveCfg.hasToken(),
+			"endpointFromEnv": endpointFromEnv(),
+			"tokenFromEnv":    envTokenConfigured(),
 		}
 		a.mu.RUnlock()
 		writeJSON(w, http.StatusOK, resp)
 	case http.MethodPost:
 		defer r.Body.Close()
-		var cfg AppConfig
+		var cfg Config
 		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&cfg); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
@@ -134,7 +125,7 @@ func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (a *App) SetConfig(cfg AppConfig) error {
+func (a *App) SetConfig(cfg Config) error {
 	a.mu.Lock()
 	a.cfg = cfg
 	running := a.status.Running
@@ -161,14 +152,14 @@ func (a *App) Start() error {
 	if strings.TrimSpace(runtimeCfg.Endpoint) == "" {
 		return fmt.Errorf("endpoint is required")
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	a.runCancel = cancel
 	a.status.Running = true
-	for _, kind := range allSignalKinds {
-		if runtimeCfg.enabled(kind) {
-			go a.runSignalLoop(ctx, kind)
+	for _, svc := range runtimeCfg.Services {
+		if !svc.Enabled {
+			continue
 		}
+		go a.runService(ctx, svc)
 	}
 	return nil
 }
@@ -186,70 +177,61 @@ func (a *App) Stop() {
 	a.status.Running = false
 }
 
-func (a *App) runSignalLoop(ctx context.Context, kind signalKind) {
+func (a *App) runService(ctx context.Context, svc Service) {
 	a.mu.RLock()
-	interval := a.cfg.IntervalSeconds
+	interval := a.cfg.Interval
 	a.mu.RUnlock()
 	if interval <= 0 {
 		interval = 5
 	}
-
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
-
-	a.sendOne(kind)
+	a.sendService(svc)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.sendOne(kind)
+			a.sendService(svc)
 		}
 	}
 }
 
-func (a *App) sendOne(kind signalKind) {
+func (a *App) sendService(svc Service) {
 	a.mu.RLock()
 	cfg := a.cfg.runtimeConfig()
 	a.mu.RUnlock()
-	if !cfg.enabled(kind) {
-		return
+	for _, kind := range []signalKind{signalSpans, signalMetrics, signalLogs} {
+		if !svc.hasSignal(kind) {
+			continue
+		}
+		payload, err := buildPayload(cfg, svc, kind)
+		if err == nil {
+			err = a.postOTLP(cfg.Endpoint, cfg.Token, kind, payload)
+		}
+		a.updateSignalStatus(svc.Name, kind, err)
 	}
-
-	payload, err := buildPayload(cfg, kind)
-	if err == nil {
-		err = a.postOTLP(cfg, kind, payload)
-	}
-	a.updateSignalStatus(kind, err)
 }
 
-func (a *App) postOTLP(cfg AppConfig, kind signalKind, payload []byte) error {
-	if strings.TrimSpace(cfg.Endpoint) == "" {
+func (a *App) postOTLP(endpoint, token string, kind signalKind, payload []byte) error {
+	if strings.TrimSpace(endpoint) == "" {
 		return fmt.Errorf("endpoint is empty")
 	}
-
-	req, err := http.NewRequest(http.MethodPost, endpointFor(cfg.Endpoint, kind), bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPost, endpointFor(endpoint, kind), bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set("Accept", "application/x-protobuf, application/json")
-	if token := strings.TrimSpace(cfg.Token); token != "" {
-		req.Header.Set(cfg.tokenHeader(), formatTokenHeader(cfg.tokenHeader(), token))
+	if tok := strings.TrimSpace(token); tok != "" {
+		req.Header.Set("Authorization", formatToken(tok))
 	}
-
-	client := &http.Client{
-		Timeout: a.httpTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipTLS}, //nolint:gosec
-		},
-	}
+	client := &http.Client{Timeout: a.httpTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode < 300 {
 		return nil
 	}
@@ -257,26 +239,52 @@ func (a *App) postOTLP(cfg AppConfig, kind signalKind, payload []byte) error {
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
-func (a *App) updateSignalStatus(kind signalKind, err error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	cur := a.status.Signals[string(kind)]
-	if err == nil {
-		cur.SentCount++
-		cur.LastSentAt = time.Now().Format(time.RFC3339)
-		cur.LastError = ""
-	} else {
-		cur.LastError = err.Error()
+// formatToken ensures the token is prefixed with "Api-Token " when it is not
+// already so prefixed.
+func formatToken(token string) string {
+	if !strings.HasPrefix(strings.ToLower(token), "api-token ") {
+		return "Api-Token " + token
 	}
-	a.status.Signals[string(kind)] = cur
+	return token
 }
 
-func (cfg AppConfig) tokenHeader() string {
-	if strings.TrimSpace(cfg.TokenHeader) == "" {
-		return "Authorization"
+func (a *App) updateSignalStatus(svcName string, kind signalKind, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ss := a.status.Services[svcName]
+	var cur *SignalStatus
+	switch kind {
+	case signalSpans:
+		cur = &ss.Spans
+	case signalMetrics:
+		cur = &ss.Metrics
+	case signalLogs:
+		cur = &ss.Logs
 	}
-	return cfg.TokenHeader
+	if cur != nil {
+		if err == nil {
+			cur.SentCount++
+			cur.LastSentAt = time.Now().Format(time.RFC3339)
+			cur.LastError = ""
+		} else {
+			cur.LastError = err.Error()
+		}
+	}
+	a.status.Services[svcName] = ss
+}
+
+// GetConfig returns a snapshot of the current config (safe to call from any goroutine).
+func (a *App) GetConfig() Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg
+}
+
+// GetStatus returns a snapshot of the current runtime status (safe to call from any goroutine).
+func (a *App) GetStatus() RuntimeStatus {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.status
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

@@ -3,49 +3,137 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 )
 
 const (
-	envEndpoint    = "OTLPFORGE_ENDPOINT"
-	envToken       = "OTLPFORGE_TOKEN"
-	envTokenHeader = "OTLPFORGE_TOKEN_HEADER"
-	legacyExampleEndpoint = "https://example.com/api/v2/otlp"
+	envEndpoint = "OTLPFORGE_ENDPOINT"
+	envToken    = "OTLPFORGE_TOKEN"
 )
 
-type AppConfig struct {
-	Endpoint           string            `json:"endpoint"`
-	Token              string            `json:"token"`
-	TokenHeader        string            `json:"tokenHeader"`
-	IntervalSeconds    int               `json:"intervalSeconds"`
-	InsecureSkipTLS    bool              `json:"insecureSkipTLS"`
-	EmitSpans          bool              `json:"emitSpans"`
-	EmitMetrics        bool              `json:"emitMetrics"`
-	EmitLogs           bool              `json:"emitLogs"`
-	ResourceAttributes map[string]string `json:"resourceAttributes"`
-	SpanName           string            `json:"spanName"`
-	SpanKind           string            `json:"spanKind"`
-	SpanMinDurationMs  int               `json:"spanMinDurationMs"`
-	SpanMaxDurationMs  int               `json:"spanMaxDurationMs"`
-	SpanFailureRate    int               `json:"spanFailureRate"`
-	SpanFailureMode    string            `json:"spanFailureMode"`
-	SpanFailureCode    int               `json:"spanFailureCode"`
-	SpanFailureMessage string            `json:"spanFailureMessage"`
-	SpanChildCount     int               `json:"spanChildCount"`
-	MetricName         string            `json:"metricName"`
-	LogMessage         string            `json:"logMessage"`
+// AttrValue is a typed OTLP attribute value.  The four scalar types from the
+// OTel spec are supported: string, bool, int (int64), double (float64).
+// In JSON it serialises as the native type so that config.json is readable:
+//
+//	"string" → JSON string     "hello"
+//	"bool"   → JSON boolean    true / false
+//	"int"    → JSON integer    42
+//	"double" → JSON number     3.14
+type AttrValue struct {
+	Type   string // "string" | "bool" | "int" | "double"
+	Str    string
+	Bool   bool
+	Int    int64
+	Double float64
 }
 
+func (a AttrValue) MarshalJSON() ([]byte, error) {
+	switch a.Type {
+	case "bool":
+		return json.Marshal(a.Bool)
+	case "int":
+		return json.Marshal(a.Int)
+	case "double":
+		return json.Marshal(a.Double)
+	default:
+		return json.Marshal(a.Str)
+	}
+}
+
+func (a *AttrValue) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	switch b[0] {
+	case 't', 'f': // JSON boolean literal
+		var bv bool
+		if err := json.Unmarshal(b, &bv); err != nil {
+			return err
+		}
+		*a = boolAttrVal(bv)
+		return nil
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		// JSON number: integer if no '.', 'e', or 'E'; double otherwise.
+		raw := string(b)
+		if !containsAny(raw, '.', 'e', 'E') {
+			var iv int64
+			if err := json.Unmarshal(b, &iv); err != nil {
+				return err
+			}
+			*a = intAttrVal(iv)
+			return nil
+		}
+		var fv float64
+		if err := json.Unmarshal(b, &fv); err != nil {
+			return err
+		}
+		*a = doubleAttrVal(fv)
+		return nil
+	default: // JSON string
+		var sv string
+		if err := json.Unmarshal(b, &sv); err != nil {
+			return err
+		}
+		*a = strAttrVal(sv)
+		return nil
+	}
+}
+
+func containsAny(s string, chars ...byte) bool {
+	for _, c := range chars {
+		for i := 0; i < len(s); i++ {
+			if s[i] == c {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Convenience constructors for the four OTel scalar attribute types.
+func strAttrVal(v string) AttrValue    { return AttrValue{Type: "string", Str: v} }
+func boolAttrVal(v bool) AttrValue     { return AttrValue{Type: "bool", Bool: v} }
+func intAttrVal(v int64) AttrValue     { return AttrValue{Type: "int", Int: v} }
+func doubleAttrVal(v float64) AttrValue { return AttrValue{Type: "double", Double: v} }
+
+// Service defines a named synthetic service to emit OTLP signals for.
+type Service struct {
+	Name        string               `json:"name"`
+	SpanKind    string               `json:"spanKind"`    // server|client|internal|producer|consumer
+	FailureRate int                  `json:"failureRate"` // 0–100 %
+	Signals     []string             `json:"signals"`     // "spans","metrics","logs"; empty = all three
+	Attributes  map[string]AttrValue `json:"attributes"`  // service.name is always added automatically
+	Enabled     bool                 `json:"enabled"`
+}
+
+// Config is the full application configuration schema.
+type Config struct {
+	Endpoint string    `json:"endpoint"`
+	Token    string    `json:"token"`
+	Interval int       `json:"interval"` // seconds between sends, default 5
+	Services []Service `json:"services"`
+}
+
+// SignalStatus tracks send state for one signal kind within a service.
 type SignalStatus struct {
 	LastSentAt string `json:"lastSentAt,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
 	SentCount  uint64 `json:"sentCount"`
 }
 
+// ServiceStatus groups signal statuses for one service.
+type ServiceStatus struct {
+	Spans   SignalStatus `json:"spans"`
+	Metrics SignalStatus `json:"metrics"`
+	Logs    SignalStatus `json:"logs"`
+}
+
+// RuntimeStatus is the top-level status payload returned by GET /api/status.
 type RuntimeStatus struct {
-	Running bool                    `json:"running"`
-	Signals map[string]SignalStatus `json:"signals"`
+	Running  bool                     `json:"running"`
+	Services map[string]ServiceStatus `json:"services"`
 }
 
 type signalKind string
@@ -56,33 +144,126 @@ const (
 	signalLogs    signalKind = "logs"
 )
 
-var allSignalKinds = []signalKind{signalSpans, signalMetrics, signalLogs}
+// hasSignal returns true if the service should emit the given signal kind.
+// An empty Signals slice means all three signals are enabled.
+func (svc Service) hasSignal(kind signalKind) bool {
+	if len(svc.Signals) == 0 {
+		return true
+	}
+	for _, s := range svc.Signals {
+		if signalKind(strings.ToLower(s)) == kind {
+			return true
+		}
+	}
+	return false
+}
 
-func defaultConfig() AppConfig {
-	return AppConfig{
-		TokenHeader:     "Authorization",
-		IntervalSeconds: 5,
-		EmitSpans:       true,
-		EmitMetrics:     true,
-		EmitLogs:        true,
-		ResourceAttributes: map[string]string{
-			"service.name": "otlpforge",
-			"env":          "dev",
-		},
-		SpanName:           "otlpforge.demo.span",
-		SpanKind:           "server",
-		SpanMinDurationMs:  20,
-		SpanMaxDurationMs:  80,
-		SpanFailureRate:    5,
-		SpanFailureMode:    "http",
-		SpanFailureCode:    500,
-		SpanFailureMessage: "simulated upstream service failure",
-		SpanChildCount:     0,
-		MetricName:         "otlpforge.requests.total",
-		LogMessage:         "Hello from OTLPForge",
+// redacted returns a copy of the config with the token cleared.
+func (cfg Config) redacted() Config {
+	cfg.Token = ""
+	return cfg
+}
+
+// hasToken returns true if the config has a non-blank token.
+func (cfg Config) hasToken() bool {
+	return strings.TrimSpace(cfg.Token) != ""
+}
+
+// withPreservedSecret returns next with the current token copied in if next.Token is blank.
+func (cfg Config) withPreservedSecret(next Config) Config {
+	if strings.TrimSpace(next.Token) == "" {
+		next.Token = cfg.Token
+	}
+	return next
+}
+
+// runtimeConfig applies OTLPFORGE_ENDPOINT and OTLPFORGE_TOKEN env overrides,
+// then normalizes the result.
+func (cfg Config) runtimeConfig() Config {
+	if endpoint := strings.TrimSpace(os.Getenv(envEndpoint)); endpoint != "" {
+		cfg.Endpoint = endpoint
+	}
+	if token := strings.TrimSpace(os.Getenv(envToken)); token != "" {
+		cfg.Token = token
+	}
+	return normalizeConfig(cfg)
+}
+
+func defaultConfig() Config {
+	return Config{
+		Interval: 5,
+		Services: []Service{{
+			Name:        "otlpforge",
+			SpanKind:    "server",
+			FailureRate: 5,
+			Signals:     []string{"spans", "metrics", "logs"},
+			Attributes: map[string]AttrValue{
+				"env":                 strAttrVal("dev"),
+				"dt.cost.costcenter":  strAttrVal("test-cost-center"),
+				"dt.security_context": strAttrVal("test-sec-ctxt"),
+			},
+			Enabled: true,
+		}},
 	}
 }
 
+func normalizeService(svc Service) Service {
+	svc.Name = strings.TrimSpace(svc.Name)
+	if strings.TrimSpace(svc.SpanKind) == "" {
+		svc.SpanKind = "server"
+	}
+	if svc.FailureRate < 0 {
+		svc.FailureRate = 0
+	}
+	if svc.FailureRate > 100 {
+		svc.FailureRate = 100
+	}
+	if svc.Attributes == nil {
+		svc.Attributes = map[string]AttrValue{}
+	}
+	return svc
+}
+
+func normalizeConfig(cfg Config) Config {
+	if cfg.Interval <= 0 {
+		cfg.Interval = 5
+	}
+	for i, svc := range cfg.Services {
+		cfg.Services[i] = normalizeService(svc)
+	}
+	return cfg
+}
+
+func validateConfig(cfg Config) error {
+	if len(cfg.Services) == 0 {
+		return errors.New("at least one service is required")
+	}
+	seen := make(map[string]struct{}, len(cfg.Services))
+	for i, svc := range cfg.Services {
+		if svc.Name == "" {
+			return fmt.Errorf("services[%d]: name is required", i)
+		}
+		if _, dup := seen[svc.Name]; dup {
+			return fmt.Errorf("services[%d]: duplicate service name %q", i, svc.Name)
+		}
+		seen[svc.Name] = struct{}{}
+		switch strings.ToLower(strings.TrimSpace(svc.SpanKind)) {
+		case "internal", "server", "client", "producer", "consumer":
+		default:
+			return fmt.Errorf("services[%d]: spanKind must be one of: internal, server, client, producer, consumer", i)
+		}
+		for j, sig := range svc.Signals {
+			switch strings.ToLower(sig) {
+			case "spans", "metrics", "logs":
+			default:
+				return fmt.Errorf("services[%d].signals[%d]: must be one of: spans, metrics, logs", i, j)
+			}
+		}
+	}
+	return nil
+}
+
+// LoadConfig reads and applies config.json, normalizing and validating the result.
 func (a *App) LoadConfig() error {
 	b, err := os.ReadFile(a.configPath)
 	if err != nil {
@@ -92,7 +273,7 @@ func (a *App) LoadConfig() error {
 		return err
 	}
 
-	var cfg AppConfig
+	var cfg Config
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return err
 	}
@@ -106,7 +287,8 @@ func (a *App) LoadConfig() error {
 	return nil
 }
 
-func (a *App) saveConfig(cfg AppConfig) error {
+// saveConfig writes cfg to config.json as indented JSON.
+func (a *App) saveConfig(cfg Config) error {
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -114,138 +296,14 @@ func (a *App) saveConfig(cfg AppConfig) error {
 	return os.WriteFile(a.configPath, b, 0o644)
 }
 
-func normalizeConfig(cfg AppConfig) AppConfig {
-	if strings.EqualFold(strings.TrimSpace(cfg.Endpoint), legacyExampleEndpoint) {
-		cfg.Endpoint = ""
-	}
-	if cfg.IntervalSeconds <= 0 {
-		cfg.IntervalSeconds = 5
-	}
-	if strings.TrimSpace(cfg.TokenHeader) == "" {
-		cfg.TokenHeader = "Authorization"
-	}
-	if cfg.ResourceAttributes == nil {
-		cfg.ResourceAttributes = map[string]string{}
-	}
-	if strings.TrimSpace(cfg.SpanName) == "" {
-		cfg.SpanName = "otlpforge.synthetic.span"
-	}
-	if strings.TrimSpace(cfg.SpanKind) == "" {
-		cfg.SpanKind = "server"
-	}
-	if cfg.SpanMinDurationMs <= 0 {
-		cfg.SpanMinDurationMs = 20
-	}
-	if cfg.SpanMaxDurationMs <= 0 {
-		cfg.SpanMaxDurationMs = 80
-	}
-	if cfg.SpanMaxDurationMs < cfg.SpanMinDurationMs {
-		cfg.SpanMaxDurationMs = cfg.SpanMinDurationMs
-	}
-	if cfg.SpanFailureRate < 0 {
-		cfg.SpanFailureRate = 0
-	}
-	if cfg.SpanFailureRate > 100 {
-		cfg.SpanFailureRate = 100
-	}
-	if strings.TrimSpace(cfg.SpanFailureMode) == "" {
-		cfg.SpanFailureMode = "http"
-	}
-	if cfg.SpanFailureCode <= 0 {
-		cfg.SpanFailureCode = 500
-	}
-	if strings.TrimSpace(cfg.SpanFailureMessage) == "" {
-		cfg.SpanFailureMessage = "simulated upstream service failure"
-	}
-	if cfg.SpanChildCount < 0 {
-		cfg.SpanChildCount = 0
-	}
-	if strings.TrimSpace(cfg.MetricName) == "" {
-		cfg.MetricName = "otlpforge.requests.total"
-	}
-	if strings.TrimSpace(cfg.LogMessage) == "" {
-		cfg.LogMessage = "OTLPForge synthetic log line"
-	}
-	return cfg
-}
-
-func validateConfig(cfg AppConfig) error {
-	if !cfg.EmitSpans && !cfg.EmitMetrics && !cfg.EmitLogs {
-		return errors.New("at least one signal type must be enabled")
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.SpanKind)) {
-	case "internal", "server", "client", "producer", "consumer":
-	default:
-		return errors.New("spanKind must be one of: internal, server, client, producer, consumer")
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.SpanFailureMode)) {
-	case "http", "timeout", "backend":
-	default:
-		return errors.New("spanFailureMode must be one of: http, timeout, backend")
-	}
-	return nil
-}
-
-func (cfg AppConfig) enabled(kind signalKind) bool {
-	switch kind {
-	case signalSpans:
-		return cfg.EmitSpans
-	case signalMetrics:
-		return cfg.EmitMetrics
-	case signalLogs:
-		return cfg.EmitLogs
-	default:
-		return false
-	}
-}
-
-func (cfg AppConfig) redacted() AppConfig {
-	cfg.Token = ""
-	return cfg
-}
-
-func (cfg AppConfig) hasToken() bool {
-	return strings.TrimSpace(cfg.Token) != ""
-}
-
-func (cfg AppConfig) withPreservedSecret(next AppConfig) AppConfig {
-	if strings.TrimSpace(next.Token) == "" {
-		next.Token = cfg.Token
-	}
-	return next
-}
-
-func (cfg AppConfig) runtimeConfig() AppConfig {
-	if endpoint := strings.TrimSpace(os.Getenv(envEndpoint)); endpoint != "" {
-		cfg.Endpoint = endpoint
-	}
-	if token := strings.TrimSpace(os.Getenv(envToken)); token != "" {
-		cfg.Token = token
-	}
-	if tokenHeader := strings.TrimSpace(os.Getenv(envTokenHeader)); tokenHeader != "" {
-		cfg.TokenHeader = tokenHeader
-	}
-	return normalizeConfig(cfg)
-}
-
-func endpointFromEnv(cfg AppConfig) bool {
-	return strings.TrimSpace(os.Getenv(envEndpoint)) != ""
-}
-
-func envTokenConfigured() bool {
-	return strings.TrimSpace(os.Getenv(envToken)) != ""
-}
-
-func tokenHeaderFromEnv(cfg AppConfig) bool {
-	return strings.TrimSpace(os.Getenv(envTokenHeader)) != ""
-}
-
+// endpointFor returns the full OTLP endpoint URL for the given signal kind.
+// If base already contains a /v1/ path it is used as-is; otherwise the
+// per-signal path is appended.
 func endpointFor(base string, kind signalKind) string {
 	base = strings.TrimSpace(base)
 	if strings.Contains(base, "/v1/logs") || strings.Contains(base, "/v1/metrics") || strings.Contains(base, "/v1/traces") {
 		return base
 	}
-
 	base = strings.TrimRight(base, "/")
 	switch kind {
 	case signalLogs:
@@ -255,4 +313,14 @@ func endpointFor(base string, kind signalKind) string {
 	default:
 		return base + "/v1/traces"
 	}
+}
+
+// endpointFromEnv reports whether OTLPFORGE_ENDPOINT is set in the environment.
+func endpointFromEnv() bool {
+	return strings.TrimSpace(os.Getenv(envEndpoint)) != ""
+}
+
+// envTokenConfigured reports whether OTLPFORGE_TOKEN is set in the environment.
+func envTokenConfigured() bool {
+	return strings.TrimSpace(os.Getenv(envToken)) != ""
 }

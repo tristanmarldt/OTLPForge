@@ -65,6 +65,48 @@ func TestBuildPayloadCreatesSpanForService(t *testing.T) {
 	}
 }
 
+// TestK8sInfraTemplatesCarryDynatraceAttributes checks that every k8s-family
+// template emits the attribute set Dynatrace's k8sattributesprocessor extracts
+// and the Dynatrace Operator injects, so the payload maps onto the same
+// Kubernetes entities as a real in-cluster collector would produce.
+func TestK8sInfraTemplatesCarryDynatraceAttributes(t *testing.T) {
+	required := []string{
+		"k8s.cluster.name", "k8s.cluster.uid",
+		"k8s.namespace.name", "k8s.node.name",
+		"k8s.pod.name", "k8s.pod.uid", "k8s.pod.ip",
+		"k8s.container.name",
+		"k8s.deployment.name", "k8s.replicaset.name",
+		"k8s.workload.kind", "k8s.workload.name",
+	}
+
+	for _, template := range []string{"k8s", "eks", "gke", "aks", "openshift"} {
+		t.Run(template, func(t *testing.T) {
+			attrs := infraDefaults(Service{Name: "svc", InfraTemplate: template})
+			for _, key := range required {
+				v, ok := attrs[key]
+				if !ok {
+					t.Errorf("missing %s", key)
+					continue
+				}
+				if v.Type != "string" || v.Str == "" {
+					t.Errorf("%s should be a non-empty string, got %+v", key, v)
+				}
+			}
+			// Deployment → ReplicaSet → Pod names must stay consistent.
+			rs := attrs["k8s.replicaset.name"].Str
+			if !strings.HasPrefix(rs, attrs["k8s.deployment.name"].Str+"-") {
+				t.Errorf("replicaset %q is not derived from deployment %q", rs, attrs["k8s.deployment.name"].Str)
+			}
+			if pod := attrs["k8s.pod.name"].Str; !strings.HasPrefix(pod, rs+"-") {
+				t.Errorf("pod %q is not derived from replicaset %q", pod, rs)
+			}
+			if kind := attrs["k8s.workload.kind"].Str; kind != "Deployment" {
+				t.Errorf("k8s.workload.kind = %q, want Deployment", kind)
+			}
+		})
+	}
+}
+
 // TestTemplateSpanAttributes verifies that each template produces the expected
 // semantic-convention attributes on the root span.
 func TestTemplateSpanAttributes(t *testing.T) {

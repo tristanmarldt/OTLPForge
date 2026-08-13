@@ -115,6 +115,42 @@ func svcAttributes(cfg Config, svc Service) []*commonpb.KeyValue {
 	return toOTLPAttributes(merged)
 }
 
+// k8sAttrs returns the Kubernetes resource attributes shared by every
+// k8s-family template (vanilla, EKS, GKE, AKS, OpenShift).
+//
+// The set mirrors what Dynatrace's OTel collector extracts via the
+// k8sattributesprocessor (pod name/uid/ip, workload names, namespace, node,
+// cluster uid, container name) plus the k8s.workload.kind / k8s.workload.name
+// pair the Dynatrace Operator injects through OTEL_RESOURCE_ATTRIBUTES.
+//
+// The pod is modelled as Deployment → ReplicaSet → Pod, so the names stay
+// internally consistent rather than listing every workload kind at once.
+func k8sAttrs(name, cluster, node string) map[string]AttrValue {
+	const rsHash = "7d9f8b6c4"
+	return map[string]AttrValue{
+		"k8s.cluster.name":    strAttrVal(cluster),
+		"k8s.cluster.uid":     strAttrVal("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+		"k8s.namespace.name":  strAttrVal("default"),
+		"k8s.node.name":       strAttrVal(node),
+		"k8s.pod.name":        strAttrVal(name + "-" + rsHash + "-xzpqr"),
+		"k8s.pod.uid":         strAttrVal("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+		"k8s.pod.ip":          strAttrVal("10.42.0.17"),
+		"k8s.container.name":  strAttrVal(name),
+		"k8s.deployment.name": strAttrVal(name),
+		"k8s.replicaset.name": strAttrVal(name + "-" + rsHash),
+		"k8s.workload.kind":   strAttrVal("Deployment"),
+		"k8s.workload.name":   strAttrVal(name),
+	}
+}
+
+// mergeAttrs copies extra over base and returns base.
+func mergeAttrs(base, extra map[string]AttrValue) map[string]AttrValue {
+	for k, v := range extra {
+		base[k] = v
+	}
+	return base
+}
+
 // infraDefaults returns resource attributes for the service's InfraTemplate.
 // Values are deterministic so resource attributes stay stable across ticks.
 // Users override specific values via svc.Attributes.
@@ -123,55 +159,31 @@ func infraDefaults(svc Service) map[string]AttrValue {
 	switch svc.InfraTemplate {
 
 	case "k8s":
-		return map[string]AttrValue{
-			"k8s.cluster.name":    strAttrVal("my-cluster"),
-			"k8s.namespace.name":  strAttrVal("default"),
-			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
-			"k8s.node.name":       strAttrVal("node-1"),
-			"k8s.deployment.name": strAttrVal(name),
-			"k8s.container.name":  strAttrVal(name),
-		}
+		return k8sAttrs(name, "my-cluster", "node-1")
 
 	case "eks":
-		return map[string]AttrValue{
-			"k8s.cluster.name":    strAttrVal("my-eks-cluster"),
-			"k8s.namespace.name":  strAttrVal("default"),
-			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
-			"k8s.node.name":       strAttrVal("ip-10-0-1-100.ec2.internal"),
-			"k8s.deployment.name": strAttrVal(name),
-			"k8s.container.name":  strAttrVal(name),
-			"cloud.provider":      strAttrVal("aws"),
-			"cloud.platform":      strAttrVal("aws_eks"),
-			"cloud.region":        strAttrVal("us-east-1"),
-			"cloud.account.id":    strAttrVal("123456789012"),
-		}
+		return mergeAttrs(k8sAttrs(name, "my-eks-cluster", "ip-10-0-1-100.ec2.internal"), map[string]AttrValue{
+			"cloud.provider":   strAttrVal("aws"),
+			"cloud.platform":   strAttrVal("aws_eks"),
+			"cloud.region":     strAttrVal("us-east-1"),
+			"cloud.account.id": strAttrVal("123456789012"),
+		})
 
 	case "gke":
-		return map[string]AttrValue{
-			"k8s.cluster.name":    strAttrVal("my-gke-cluster"),
-			"k8s.namespace.name":  strAttrVal("default"),
-			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
-			"k8s.node.name":       strAttrVal("gke-my-cluster-default-pool-abc12345-abcd"),
-			"k8s.deployment.name": strAttrVal(name),
-			"k8s.container.name":  strAttrVal(name),
-			"cloud.provider":      strAttrVal("gcp"),
-			"cloud.platform":      strAttrVal("gcp_kubernetes_engine"),
-			"cloud.region":        strAttrVal("us-central1"),
-			"cloud.account.id":    strAttrVal("my-gcp-project"),
-		}
+		return mergeAttrs(k8sAttrs(name, "my-gke-cluster", "gke-my-cluster-default-pool-abc12345-abcd"), map[string]AttrValue{
+			"cloud.provider":   strAttrVal("gcp"),
+			"cloud.platform":   strAttrVal("gcp_kubernetes_engine"),
+			"cloud.region":     strAttrVal("us-central1"),
+			"cloud.account.id": strAttrVal("my-gcp-project"),
+		})
 
 	case "aks":
-		return map[string]AttrValue{
-			"k8s.cluster.name":    strAttrVal("my-aks-cluster"),
-			"k8s.namespace.name":  strAttrVal("default"),
-			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
-			"k8s.node.name":       strAttrVal("aks-nodepool1-12345678-vmss000000"),
-			"k8s.deployment.name": strAttrVal(name),
-			"k8s.container.name":  strAttrVal(name),
-			"cloud.provider":      strAttrVal("azure"),
-			"cloud.platform":      strAttrVal("azure_aks"),
-			"cloud.region":        strAttrVal("eastus"),
-		}
+		return mergeAttrs(k8sAttrs(name, "my-aks-cluster", "aks-nodepool1-12345678-vmss000000"), map[string]AttrValue{
+			"cloud.provider":   strAttrVal("azure"),
+			"cloud.platform":   strAttrVal("azure_aks"),
+			"cloud.region":     strAttrVal("eastus"),
+			"cloud.account.id": strAttrVal("12345678-1234-1234-1234-123456789012"),
+		})
 
 	case "ecs":
 		return map[string]AttrValue{
@@ -235,15 +247,9 @@ func infraDefaults(svc Service) map[string]AttrValue {
 		}
 
 	case "openshift":
-		return map[string]AttrValue{
-			"k8s.cluster.name":    strAttrVal("my-ocp-cluster"),
-			"k8s.namespace.name":  strAttrVal("default"),
-			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
-			"k8s.node.name":       strAttrVal("ocp-worker-1"),
-			"k8s.deployment.name": strAttrVal(name),
-			"k8s.container.name":  strAttrVal(name),
-			"cloud.platform":      strAttrVal("openshift"),
-		}
+		return mergeAttrs(k8sAttrs(name, "my-ocp-cluster", "ocp-worker-1"), map[string]AttrValue{
+			"cloud.platform": strAttrVal("openshift"),
+		})
 
 	case "containerd":
 		return map[string]AttrValue{

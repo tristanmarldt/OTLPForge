@@ -27,15 +27,30 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 	switch kind {
 	case signalSpans:
 		traceID := mustDecodeHex(randomHex(16), 16)
-		spanID := mustDecodeHex(randomHex(8), 8)
+		rootID := mustDecodeHex(randomHex(8), 8)
 		failed := mathrand.IntN(100) < svc.FailureRate
-		dur := randomDuration()
-		end := now.Add(dur)
-		span := newSpan(svc, traceID, spanID, now, end, failed)
+		rootDur := randomRootDuration()
+		rootEnd := now.Add(rootDur)
+		root := newSpan(svc, traceID, rootID, now, rootEnd, failed)
+
+		spans := []*tracepb.Span{root}
+		offset := 5 * time.Millisecond
+		for i := 0; i < svc.ChildSpans; i++ {
+			childID := mustDecodeHex(randomHex(8), 8)
+			childDur := randomChildDuration()
+			childStart := now.Add(offset)
+			childEnd := childStart.Add(childDur)
+			if childEnd.After(rootEnd) {
+				childEnd = rootEnd
+			}
+			spans = append(spans, newChildSpan(svc.Name, traceID, childID, rootID, childStart, childEnd, i, failed))
+			offset += childDur + 2*time.Millisecond
+		}
+
 		return proto.Marshal(&collectortracepb.ExportTraceServiceRequest{
 			ResourceSpans: []*tracepb.ResourceSpans{{
 				Resource:   resource,
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: []*tracepb.Span{span}}},
+				ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: spans}},
 			}},
 		})
 	case signalMetrics:
@@ -149,9 +164,46 @@ func mapSpanKind(value string) tracepb.Span_SpanKind {
 	}
 }
 
-// randomDuration returns a random span duration between 20 and 200 ms.
-func randomDuration() time.Duration {
-	return time.Duration(20+mathrand.IntN(181)) * time.Millisecond
+// randomRootDuration returns a random root span duration between 50 and 500 ms.
+func randomRootDuration() time.Duration {
+	return time.Duration(50+mathrand.IntN(451)) * time.Millisecond
+}
+
+// randomChildDuration returns a random child span duration between 5 and 80 ms.
+func randomChildDuration() time.Duration {
+	return time.Duration(5+mathrand.IntN(76)) * time.Millisecond
+}
+
+// childSpanOps are the operation names cycled through for child spans.
+var childSpanOps = []string{
+	"db.query",
+	"cache.lookup",
+	"http.request",
+	"queue.publish",
+	"grpc.call",
+	"db.transaction",
+	"auth.validate",
+	"storage.read",
+	"storage.write",
+	"event.emit",
+}
+
+func newChildSpan(svcName string, traceID, spanID, parentID []byte, start, end time.Time, idx int, failed bool) *tracepb.Span {
+	op := childSpanOps[idx%len(childSpanOps)]
+	status := &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK}
+	if failed {
+		status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR, Message: "simulated failure"}
+	}
+	return &tracepb.Span{
+		TraceId:           traceID,
+		SpanId:            spanID,
+		ParentSpanId:      parentID,
+		Name:              svcName + "." + op,
+		Kind:              tracepb.Span_SPAN_KIND_CLIENT,
+		StartTimeUnixNano: uint64(start.UnixNano()),
+		EndTimeUnixNano:   uint64(end.UnixNano()),
+		Status:            status,
+	}
 }
 
 func mustDecodeHex(value string, byteLen int) []byte {

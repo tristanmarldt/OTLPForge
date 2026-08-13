@@ -83,9 +83,7 @@ func (a *App) Stop() {
 }
 
 func (a *App) runService(ctx context.Context, svc Service) {
-	a.mu.RLock()
-	interval := a.cfg.Interval
-	a.mu.RUnlock()
+	interval := svc.Interval
 	if interval <= 0 {
 		interval = 5
 	}

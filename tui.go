@@ -71,6 +71,8 @@ type tui struct {
 	fName            string
 	fSpanKind        string
 	fFailure         string
+	fInterval        string
+	fChildSpans      string
 	fSignals         []string
 	fEnabled         bool
 	fAttrs           string
@@ -79,7 +81,6 @@ type tui struct {
 	// bound form fields – global settings
 	gEndpoint string
 	gToken    string
-	gInterval string
 
 	flash    string
 	flashErr bool
@@ -232,6 +233,8 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 		m.fName = ""
 		m.fSpanKind = "server"
 		m.fFailure = "5"
+		m.fInterval = "5"
+		m.fChildSpans = "0"
 		m.fSignals = []string{"spans", "metrics", "logs"}
 		m.fEnabled = true
 		m.fAttrs = ""
@@ -240,6 +243,8 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 		m.fName = svc.Name
 		m.fSpanKind = svc.SpanKind
 		m.fFailure = strconv.Itoa(svc.FailureRate)
+		m.fInterval = strconv.Itoa(svc.Interval)
+		m.fChildSpans = strconv.Itoa(svc.ChildSpans)
 		if len(svc.Signals) == 0 {
 			m.fSignals = []string{"spans", "metrics", "logs"}
 		} else {
@@ -281,6 +286,27 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 					}
 					return nil
 				}),
+			huh.NewInput().
+				Title("Interval (seconds)").
+				Value(&m.fInterval).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(strings.TrimSpace(s))
+					if err != nil || n < 1 {
+						return fmt.Errorf("must be ≥ 1")
+					}
+					return nil
+				}),
+			huh.NewInput().
+				Title("Child spans (0–10)").
+				Description("Client spans nested under the root trace span").
+				Value(&m.fChildSpans).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(strings.TrimSpace(s))
+					if err != nil || n < 0 || n > 10 {
+						return fmt.Errorf("must be 0–10")
+					}
+					return nil
+				}),
 			huh.NewMultiSelect[string]().
 				Title("Signals").
 				Options(
@@ -313,6 +339,8 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 	m.form = nil
 
 	failRate, _ := strconv.Atoi(strings.TrimSpace(m.fFailure))
+	interval, _ := strconv.Atoi(strings.TrimSpace(m.fInterval))
+	childSpans, _ := strconv.Atoi(strings.TrimSpace(m.fChildSpans))
 	signals := m.fSignals
 	if len(signals) == 3 {
 		signals = nil // all three selected = store as empty (= all enabled)
@@ -322,6 +350,8 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 		Name:        strings.TrimSpace(m.fName),
 		SpanKind:    m.fSpanKind,
 		FailureRate: failRate,
+		Interval:    interval,
+		ChildSpans:  childSpans,
 		Signals:     signals,
 		Enabled:     m.fEnabled,
 		Attributes:  parseAttrs(m.fAttrs),
@@ -388,14 +418,12 @@ func (m *tui) commitAttrs() (tea.Model, tea.Cmd) {
 func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 	m.gEndpoint = m.cfg.Endpoint
 	m.gToken = ""
-	m.gInterval = strconv.Itoa(m.cfg.Interval)
 
 	tokenDesc := "Leave blank to keep current token"
 	if !m.cfg.hasToken() {
 		tokenDesc = "No token currently configured"
 	}
 
-	w := m.formWidth()
 	m.form = huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -407,18 +435,8 @@ func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 				Description(tokenDesc).
 				Password(true).
 				Value(&m.gToken),
-			huh.NewInput().
-				Title("Interval (seconds)").
-				Value(&m.gInterval).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 1 {
-						return fmt.Errorf("must be ≥ 1")
-					}
-					return nil
-				}),
 		),
-	).WithWidth(w)
+	).WithWidth(m.formWidth())
 
 	m.screen = screenGlobal
 	return m, m.form.Init()
@@ -428,17 +446,11 @@ func (m *tui) commitGlobal() (tea.Model, tea.Cmd) {
 	m.screen = screenList
 	m.form = nil
 
-	interval, _ := strconv.Atoi(strings.TrimSpace(m.gInterval))
-	if interval < 1 {
-		interval = 5
-	}
-
 	cfg := m.cfg
 	cfg.Endpoint = strings.TrimSpace(m.gEndpoint)
 	if tok := strings.TrimSpace(m.gToken); tok != "" {
 		cfg.Token = tok
 	}
-	cfg.Interval = interval
 
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
@@ -599,8 +611,7 @@ func (m *tui) renderHeader() string {
 	} else {
 		ep = sMuted.Render(ep)
 	}
-	meta := sMuted.Render(fmt.Sprintf("  interval: %ds", m.cfg.Interval))
-	line2 := "  " + ep + meta
+	line2 := "  " + ep
 
 	sep := sMuted.Render(strings.Repeat("─", min(m.width, 72)))
 	return line1 + "\n" + line2 + "\n" + sep
@@ -626,7 +637,12 @@ func (m *tui) renderService(i int, svc Service) string {
 
 	kind := sMuted.Render(svc.SpanKind)
 	errRate := sMuted.Render(fmt.Sprintf("%d%% err", svc.FailureRate))
-	row1 := fmt.Sprintf("%s%s %s  %s  %s", cursor, dot, name, kind, errRate)
+	interval := sMuted.Render(fmt.Sprintf("%ds", svc.Interval))
+	var children string
+	if svc.ChildSpans > 0 {
+		children = "  " + sMuted.Render(fmt.Sprintf("+%d child", svc.ChildSpans))
+	}
+	row1 := fmt.Sprintf("%s%s %s  %s  %s  %s%s", cursor, dot, name, kind, errRate, interval, children)
 
 	// live signal counters
 	ss := m.status.Services[svc.Name]

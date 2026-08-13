@@ -103,6 +103,8 @@ type Service struct {
 	Name        string               `json:"name"`
 	SpanKind    string               `json:"spanKind"`    // server|client|internal|producer|consumer
 	FailureRate int                  `json:"failureRate"` // 0–100 %
+	Interval    int                  `json:"interval"`    // seconds between sends, minimum 1
+	ChildSpans  int                  `json:"childSpans"`  // additional client spans under the root, 0–10
 	Signals     []string             `json:"signals"`     // "spans","metrics","logs"; empty = all three
 	Attributes  map[string]AttrValue `json:"attributes"`  // service.name is always added automatically
 	Enabled     bool                 `json:"enabled"`
@@ -112,7 +114,6 @@ type Service struct {
 type Config struct {
 	Endpoint string    `json:"endpoint"`
 	Token    string    `json:"token"`
-	Interval int       `json:"interval"` // seconds between sends, default 5
 	Services []Service `json:"services"`
 }
 
@@ -177,11 +178,12 @@ func (cfg Config) runtimeConfig() Config {
 
 func defaultConfig() Config {
 	return Config{
-		Interval: 5,
 		Services: []Service{{
 			Name:        "otgen",
 			SpanKind:    "server",
 			FailureRate: 5,
+			Interval:    5,
+			ChildSpans:  0,
 			Signals:     []string{"spans", "metrics", "logs"},
 			Attributes: map[string]AttrValue{
 				"env":                 strAttrVal("dev"),
@@ -204,6 +206,15 @@ func normalizeService(svc Service) Service {
 	if svc.FailureRate > 100 {
 		svc.FailureRate = 100
 	}
+	if svc.Interval <= 0 {
+		svc.Interval = 5
+	}
+	if svc.ChildSpans < 0 {
+		svc.ChildSpans = 0
+	}
+	if svc.ChildSpans > 10 {
+		svc.ChildSpans = 10
+	}
 	if svc.Attributes == nil {
 		svc.Attributes = map[string]AttrValue{}
 	}
@@ -211,9 +222,6 @@ func normalizeService(svc Service) Service {
 }
 
 func normalizeConfig(cfg Config) Config {
-	if cfg.Interval <= 0 {
-		cfg.Interval = 5
-	}
 	for i, svc := range cfg.Services {
 		cfg.Services[i] = normalizeService(svc)
 	}

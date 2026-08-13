@@ -260,31 +260,36 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "n":
-		return m.openServiceForm(-1)
+		// new service: go straight to Settings form
+		m.loadServiceFields(-1)
+		m.editTab = 0
+		m.tabBarActive = false
+		m.quickEdit = false
+		m.form = m.makeServiceTabForm(0)
+		m.screen = screenServiceEdit
+		return m, m.form.Init()
 
 	case "enter":
-		if len(svcs) > 0 {
-			return m.openServiceForm(m.cursor)
-		}
-
-	case "a":
+		// existing service: open tab selector so user picks which tab to open
 		if len(svcs) > 0 {
 			m.loadServiceFields(m.cursor)
-			m.editTab = 2
-			m.tabBarActive = false
-			m.quickEdit = true
-			m.form = m.makeServiceTabForm(2)
+			m.editTab = 0
+			m.tabBarActive = true
+			m.quickEdit = false
+			m.form = nil
 			m.screen = screenServiceEdit
-			return m, m.form.Init()
+			return m, nil
 		}
 
-	case "s":
+	case "1", "2", "3", "4":
+		// jump directly to a specific tab
 		if len(svcs) > 0 {
+			tab := int(k.Runes[0] - '1')
 			m.loadServiceFields(m.cursor)
-			m.editTab = 3
+			m.editTab = tab
 			m.tabBarActive = false
-			m.quickEdit = true
-			m.form = m.makeServiceTabForm(3)
+			m.quickEdit = true // save immediately on completion
+			m.form = m.makeServiceTabForm(tab)
 			m.screen = screenServiceEdit
 			return m, m.form.Init()
 		}
@@ -917,7 +922,7 @@ func (m *tui) renderService(i int, svc Service) string {
 }
 
 func (m *tui) renderHelp() string {
-	keys := []string{"n new", "↵ edit", "a res-attrs", "s span-attrs", "d delete", "␣ toggle", "r run/stop", "g settings", "G global-attrs", "q quit"}
+	keys := []string{"n new", "↵ tab-select", "1-4 edit", "d delete", "␣ toggle", "r run/stop", "g settings", "G global-attrs", "q quit"}
 	return sHelp.Render("  " + strings.Join(keys, "  ·  "))
 }
 

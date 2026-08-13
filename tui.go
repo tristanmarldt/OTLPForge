@@ -215,10 +215,32 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Esc leaves the form. Inside a tabbed editor it returns to that editor's
-	// selector (field values survive); elsewhere it returns to the list.
-	if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyEsc {
-		return m.leaveForm()
+	if k, ok := msg.(tea.KeyMsg); ok {
+		// Esc leaves the form. Inside a tabbed editor it returns to that
+		// editor's selector (field values survive); elsewhere to the list.
+		if k.Type == tea.KeyEsc {
+			return m.leaveForm()
+		}
+		// Switch tabs without leaving the form.
+		//
+		// ctrl+<digit> is deliberately not used: terminals cannot transmit it
+		// (ctrl+1 sends nothing, ctrl+3 arrives as Esc) and bubbletea has no
+		// key for it. ctrl+o is free — huh and bubbles between them claim
+		// ctrl+a/b/c/d/e/f/h/j/k/m/n/p/t/u/v/w — and F-keys work wherever the
+		// terminal sends them.
+		if tabs := m.currentTabs(); tabs != nil {
+			switch k.String() {
+			case "ctrl+o":
+				return m.switchTab((m.currentTab() + 1) % len(tabs))
+			case "ctrl+r":
+				return m.switchTab((m.currentTab() - 1 + len(tabs)) % len(tabs))
+			case "f1", "f2", "f3", "f4", "f5":
+				if i := int(k.String()[1] - '1'); i < len(tabs) {
+					return m.switchTab(i)
+				}
+				return m, nil
+			}
+		}
 	}
 
 	newModel, cmd := m.form.Update(msg)
@@ -232,6 +254,38 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.leaveForm()
 	}
 	return m, cmd
+}
+
+// currentTabs returns the tab set of the screen currently showing a form,
+// or nil when the screen is not tabbed.
+func (m *tui) currentTabs() []string {
+	switch m.screen {
+	case screenServiceEdit:
+		return serviceTabNames
+	case screenGlobal:
+		return globalTabNames
+	}
+	return nil
+}
+
+func (m *tui) currentTab() int {
+	if m.screen == screenGlobal {
+		return m.globalIdx
+	}
+	return m.editTab
+}
+
+// switchTab jumps straight to another tab of the open editor, keeping the
+// field values entered so far.
+func (m *tui) switchTab(idx int) (tea.Model, tea.Cmd) {
+	if m.screen == screenGlobal {
+		m.globalIdx = idx
+		m.form = m.makeGlobalTabForm(idx)
+		return m, m.form.Init()
+	}
+	m.editTab = idx
+	m.openServiceTab(idx)
+	return m, m.form.Init()
 }
 
 // leaveForm handles Esc / abort out of an open form.
@@ -568,14 +622,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 					Affirmative("Yes").
 					Negative("No").
 					Value(&m.fEnabled),
-				huh.NewMultiSelect[string]().
-					Title("Signals").
-					Options(
-						huh.NewOption("spans", "spans"),
-						huh.NewOption("metrics", "metrics"),
-						huh.NewOption("logs", "logs"),
-					).
-					Value(&m.fSignals),
+				newSignalsField(settingsLabel("Signals"), &m.fSignals),
 			),
 		).WithWidth(w)
 
@@ -1011,7 +1058,7 @@ func (m *tui) View() string {
 			return m.serviceSelectorView()
 		}
 		if m.form != nil {
-			return m.tabBar(serviceTabNames, m.editTab) + "\n" + m.form.View()
+			return m.tabBar(serviceTabNames, m.editTab) + "\n" + m.tabSwitchHint() + "\n" + m.form.View()
 		}
 
 	case screenGlobal:
@@ -1019,7 +1066,7 @@ func (m *tui) View() string {
 			return m.globalSelectorView()
 		}
 		if m.form != nil {
-			return m.tabBar(globalTabNames, m.globalIdx) + "\n" + m.form.View()
+			return m.tabBar(globalTabNames, m.globalIdx) + "\n" + m.tabSwitchHint() + "\n" + m.form.View()
 		}
 	}
 	if m.form != nil && m.screen != screenList {
@@ -1069,6 +1116,16 @@ func (m *tui) tabBar(names []string, active int) string {
 		sMuted.Render(fmt.Sprintf("tab %d/%d", active+1, len(names))),
 		sPrimaryBold.Render(names[active]))
 	return bar + "\n  " + m.sepLine()
+}
+
+// tabSwitchHint is shown under the tab bar while a form is focused, so the
+// in-form switch keys are discoverable without opening the help overlay.
+func (m *tui) tabSwitchHint() string {
+	full := "  ctrl+o / ctrl+r  next / prev tab   ·   f1-f5  jump   ·   esc  tab list"
+	if lipgloss.Width(full) <= m.width {
+		return sHelp.Render(full)
+	}
+	return sHelp.Render("  ctrl+o next tab · esc tab list")
 }
 
 // serviceSelectorView lists the editor tabs with a summary of each one.
@@ -1237,10 +1294,17 @@ func (m *tui) helpView() string {
 			{"?", "this help"},
 			{"q", "quit (stops the generator)"},
 		}},
-		{"Inside the editor", []row{
+		{"Editor — tab list", []row{
 			{"enter / 1-5", "open a tab"},
 			{"s", "save and return to the list"},
-			{"esc", "leave the form, then leave the editor"},
+			{"esc", "leave the editor (asks if unsaved)"},
+		}},
+		{"Editor — inside a tab", []row{
+			{"ctrl+o", "next tab, without leaving the form"},
+			{"ctrl+r", "previous tab"},
+			{"f1 – f5", "jump straight to a tab"},
+			{"esc", "back to the tab list"},
+			{"space", "toggle a signal on the Settings tab"},
 			{"alt+enter", "new line inside an attribute textarea"},
 			{"/", "filter long template lists"},
 		}},

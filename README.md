@@ -84,6 +84,17 @@ The editor is split into five tabs, reachable from the tab list or directly with
 The tab list shows a summary of each tab and flags unsaved changes. `s` saves,
 `Esc` backs out (and asks first if anything is unsaved).
 
+From **inside** a tab you can switch without going back to the list:
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+O` / `Ctrl+R` | Next / previous tab |
+| `F1` – `F5` | Jump straight to a tab |
+| `Esc` | Back to the tab list |
+
+`Ctrl+1`–`5` is deliberately not used: terminals cannot transmit it — `Ctrl+1`
+sends nothing at all and `Ctrl+3` arrives as `Esc`.
+
 Attributes marked `~` are inherited from the selected template and keep tracking
 it; editing one turns it into an override, marked `✎`.
 

@@ -15,7 +15,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const version = "0.1.0"
+// version is set at build time via -ldflags "-X main.version=…"
+var version = "dev"
 
 func main() {
 	// Redirect log output so it doesn't corrupt the TUI.

@@ -333,6 +333,13 @@ func endpointFor(base string, kind signalKind) string {
 }
 
 // endpointFromEnv reports whether OTGEN_ENDPOINT is set in the environment.
+// When true the saved/UI endpoint is ignored at runtime (see runtimeConfig).
 func endpointFromEnv() bool {
 	return strings.TrimSpace(os.Getenv(envEndpoint)) != ""
+}
+
+// tokenFromEnv reports whether OTGEN_TOKEN is set in the environment.
+// When true the saved/UI token is ignored at runtime (see runtimeConfig).
+func tokenFromEnv() bool {
+	return strings.TrimSpace(os.Getenv(envToken)) != ""
 }

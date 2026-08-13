@@ -175,6 +175,25 @@ func (a *App) updateSignalStatus(svcName string, kind signalKind, err error) {
 	a.status.Services[svcName] = ss
 }
 
+// TestConnection posts a single throwaway span to the configured endpoint and
+// reports whether the endpoint and token are usable. It is safe to call while
+// the generator is running.
+func (a *App) TestConnection() error {
+	a.mu.RLock()
+	cfg := a.cfg.runtimeConfig()
+	a.mu.RUnlock()
+
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		return fmt.Errorf("endpoint is required")
+	}
+	svc := normalizeService(Service{Name: "otgen-connection-test", SpanKind: "internal"})
+	payload, err := buildPayload(cfg, svc, signalSpans)
+	if err != nil {
+		return err
+	}
+	return a.postOTLP(cfg.Endpoint, cfg.Token, signalSpans, payload)
+}
+
 // GetConfig returns a snapshot of the current config (safe to call from any goroutine).
 func (a *App) GetConfig() Config {
 	a.mu.RLock()

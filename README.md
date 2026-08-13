@@ -50,22 +50,43 @@ Requires Go 1.24+.
 
 ## Key bindings
 
+Press `?` in the app for the full reference.
+
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Navigate service list |
-| `↵` Enter | Edit service (full editor) |
-| `a` | Edit resource attributes only |
+| `↵` Enter | Open the service editor (tab list) |
+| `1` – `4` | Edit one tab directly, saves on submit |
+| `n` | New service (guided through every tab) |
 | `Space` | Toggle service enabled / disabled |
-| `r` | Start / stop sending |
-| `n` | New service |
 | `d` | Delete service (with confirm) |
-| `g` | Global settings (endpoint, token, interval) |
+| `r` | Start / stop sending |
+| `t` | Send one test span and report the result |
+| `g` | Global configuration (endpoint, token, attributes) |
+| `?` | Keyboard reference |
 | `q` | Quit |
-| `Esc` | Cancel / back (in any editor) |
+| `Esc` | Leave the current form, then leave the editor |
 
-## Resource attributes
+### Service editor
 
-The attribute editor accepts one `key=value` per line. Types are auto-detected:
+The editor is split into four tabs, reachable from the tab list or directly with `1`–`4`:
+
+| Tab | Contents |
+|-----|----------|
+| `1` Settings | Name, interval, failure rate, child spans, span kind, signals, enabled |
+| `2` Templates | Span template (HTTP / DB / messaging / gRPC) and infrastructure template |
+| `3` Resource attrs | Resource-level attributes |
+| `4` Span attrs | Span-level overrides for the span template |
+
+The tab list shows a summary of each tab and flags unsaved changes. `s` saves,
+`Esc` backs out (and asks first if anything is unsaved).
+
+Attributes marked `~` are inherited from the selected template and keep tracking
+it; editing one turns it into an override, marked `✎`.
+
+## Attributes
+
+The attribute editors accept one `key=value` per line. Types are auto-detected:
 
 ```
 env=staging                  # string
@@ -83,6 +104,9 @@ version="1.0"                # string (quoted to prevent numeric detection)
 |----------|-------------|
 | `OTGEN_ENDPOINT` | OTLP base URL, overrides saved config |
 | `OTGEN_TOKEN` | API token, overrides saved config |
+
+When either is set the header marks the affected field `[env]`, since the
+environment wins over anything entered in the UI.
 
 Config is saved to `config.json` in the working directory.
 

@@ -5,25 +5,27 @@ A lightweight synthetic OTLP data generator with a terminal UI.
 Run it, point it at an endpoint, watch spans · metrics · logs flow. Useful for testing Dynatrace ingest pipelines, validating dashboards, or load-testing collectors without needing a real application.
 
 ```
-otgen v0.1.0  ● running
-  https://xxx.live.dynatrace.com/api/v2/otlp  interval: 5s
-────────────────────────────────────────────────────────────────────────
+  otgen v0.2.2  ● running
+  https://xxx.live.dynatrace.com/api/v2/otlp  ·  2 global attr
+  ────────────────────────────────────────────────────────────────────────
 
-▶ ● checkout-svc   server  5% err
+▶ ● checkout-svc  server  [http-server]  [k8s]  5s  5% err  +3 child
     spans↑142  metrics↑142  logs↑142
-
-  ● payment-svc    client  10% err
+    res  ~ k8s.cluster.name=my-cluster  k8s.pod.uid=a1b2c3d4-…  +10
+    span ~ http.request.method=GET  url.scheme=https  +4
+  ● payment-svc  client  [grpc]  [eks]  5s  10% err
     spans↑139  metrics↑139  logs↑139
+  ○ flaky-worker  consumer  [messaging]  2s  80% err
+    disabled — press space to enable
 
-  ○ flaky-worker   consumer  80% err  (disabled)
-    spans↑0
-
-  n new  ·  ↵ edit  ·  a attrs  ·  d delete  ·  ␣ toggle  ·  r run/stop  ·  g settings  ·  q quit
+  n new · ↵ edit · 1-5 tab · d delete · ␣ toggle · r run/stop · t test · g config · ? help · q quit
 ```
 
 ## Features
 
-- **Service-centric model** — each service emits independently with its own span kind, failure rate, signal selection, and resource attributes
+- **Service-centric model** — each service emits independently with its own interval, span kind, failure rate, child spans, signal selection, and attributes
+- **Semantic-convention templates** — HTTP, database, messaging and gRPC spans carry the right OTel attributes so Dynatrace detects the technology
+- **Infrastructure templates** — Kubernetes (incl. EKS / GKE / AKS / OpenShift), ECS, Docker, Lambda, Cloud Foundry and more, matching what the Dynatrace collector's `k8sattributesprocessor` and Operator inject
 - **Four OTel attribute types** — `string`, `bool`, `int64`, `double` — sent as native OTLP `AnyValue` types on the wire
 - **Keyboard-driven TUI** — live status counters, no browser required
 - **Dynatrace-compatible** — HTTP OTLP, protobuf, auto-prefixes `Api-Token`
@@ -56,7 +58,7 @@ Press `?` in the app for the full reference.
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Navigate service list |
 | `↵` Enter | Open the service editor (tab list) |
-| `1` – `4` | Edit one tab directly, saves on submit |
+| `1` – `5` | Edit one tab directly, saves on submit |
 | `n` | New service (guided through every tab) |
 | `Space` | Toggle service enabled / disabled |
 | `d` | Delete service (with confirm) |
@@ -69,14 +71,15 @@ Press `?` in the app for the full reference.
 
 ### Service editor
 
-The editor is split into four tabs, reachable from the tab list or directly with `1`–`4`:
+The editor is split into five tabs, reachable from the tab list or directly with `1`–`5`:
 
 | Tab | Contents |
 |-----|----------|
 | `1` Settings | Name, interval, failure rate, child spans, span kind, signals, enabled |
-| `2` Templates | Span template (HTTP / DB / messaging / gRPC) and infrastructure template |
-| `3` Resource attrs | Resource-level attributes |
-| `4` Span attrs | Span-level overrides for the span template |
+| `2` Span template | HTTP server / client, database, messaging, gRPC |
+| `3` Infra template | Kubernetes (incl. EKS / GKE / AKS / OpenShift), containers, serverless, host |
+| `4` Resource attrs | Resource-level attributes |
+| `5` Span attrs | Span-level overrides for the span template |
 
 The tab list shows a summary of each tab and flags unsaved changes. `s` saves,
 `Esc` backs out (and asks first if anything is unsaved).

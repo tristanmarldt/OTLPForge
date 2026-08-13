@@ -108,6 +108,53 @@ func TestEnvOverridesAreSurfaced(t *testing.T) {
 	}
 }
 
+// TestTemplateSelectsRenderEveryOption guards against reintroducing
+// Select.Height(): huh v1.0.0 pins viewport.YOffset to the selected index on
+// every Update when a height is set, which both scrolls the list under a
+// stationary cursor and hides the options past the fold.
+func TestTemplateSelectsRenderEveryOption(t *testing.T) {
+	cases := []struct {
+		tab      int
+		lastOpt  string
+		firstOpt string
+	}{
+		{1, "gRPC", "None (generic)"},
+		{2, "PaaS · Cloud Foundry / Tanzu", "Kubernetes · vanilla"},
+	}
+
+	m := testTUI(t)
+	m.loadServiceFields(0)
+	for _, tc := range cases {
+		m.editTab = tc.tab
+		m.tabActive = false
+		m.screen = screenServiceEdit
+		m.openServiceTab(tc.tab)
+		m.form.Init()
+
+		view := m.View()
+		for _, want := range []string{tc.firstOpt, tc.lastOpt} {
+			if !strings.Contains(view, want) {
+				t.Errorf("tab %d does not render %q — the select is being clipped by a viewport:\n%s",
+					tc.tab+1, want, view)
+			}
+		}
+	}
+}
+
+// TestTabBarFitsNarrowTerminals guards the tab bar against wrapping.
+func TestTabBarFitsNarrowTerminals(t *testing.T) {
+	m := testTUI(t)
+	for _, w := range []int{40, 60, 80, 100, 160} {
+		m.width = w
+		for active := range serviceTabNames {
+			bar := strings.SplitN(m.tabBar(serviceTabNames, active), "\n", 2)[0]
+			if got := len([]rune(stripANSI(bar))); got > w {
+				t.Errorf("tab bar is %d cols at width %d (active %d): %q", got, w, active, bar)
+			}
+		}
+	}
+}
+
 // TestHelpLineFitsNarrowTerminals guards the help footer against wrapping.
 func TestHelpLineFitsNarrowTerminals(t *testing.T) {
 	m := testTUI(t)

@@ -64,7 +64,7 @@ const (
 type editMode int
 
 const (
-	// modeQuick: opened with 1-4 from the list — completing saves and returns
+	// modeQuick: opened with 1-5 from the list — completing saves and returns
 	// straight to the list.
 	modeQuick editMode = iota
 	// modeSelector: opened from the tab selector — completing saves and returns
@@ -75,7 +75,7 @@ const (
 	modeWizard
 )
 
-var serviceTabNames = []string{"Settings", "Templates", "Resource attrs", "Span attrs"}
+var serviceTabNames = []string{"Settings", "Span template", "Infra template", "Resource attrs", "Span attrs"}
 
 var globalTabNames = []string{"Connection", "Global attributes"}
 
@@ -97,7 +97,7 @@ type tui struct {
 
 	// service editor state
 	editIdx   int  // index in cfg.Services; -1 = new service
-	editTab   int  // active tab (0–3)
+	editTab   int  // active tab (0–4)
 	tabActive bool // true = tab selector focused; false = huh form focused
 	mode      editMode
 	origSvc   Service // snapshot used for unsaved-change detection
@@ -322,7 +322,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		// Jump straight into one tab; completing it saves and returns here.
 		if len(svcs) > 0 {
 			m.loadServiceFields(m.cursor)
@@ -573,13 +573,16 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	case 1: // Templates
+	case 1: // Span template
+		// No .Height() here: huh v1.0.0 pins viewport.YOffset to the selected
+		// index on every Update when a height is set, so the list scrolls under
+		// a stationary cursor. Each select gets its own tab instead, short
+		// enough to render whole.
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("Span template").
 					Description("OTel semantic-convention attributes on each span · / to filter").
-					Height(8).
 					Options(
 						huh.NewOption("None (generic)", ""),
 						huh.NewOption("HTTP · server", "http-server"),
@@ -589,10 +592,15 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						huh.NewOption("gRPC", "grpc"),
 					).
 					Value(&m.fTemplate),
+			),
+		).WithWidth(w)
+
+	case 2: // Infrastructure template
+		return huh.NewForm(
+			huh.NewGroup(
 				huh.NewSelect[string]().
 					Title("Infrastructure template").
 					Description("Resource attributes for the deployment environment · / to filter").
-					Height(10).
 					Options(
 						huh.NewOption("None", ""),
 						huh.NewOption("Kubernetes · vanilla", "k8s"),
@@ -616,7 +624,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	case 2: // Resource attrs
+	case 3: // Resource attrs
 		desc := attrTypeHint
 		if m.fAttrsSeed != "" && strings.TrimSpace(m.fAttrs) == strings.TrimSpace(m.fAttrsSeed) {
 			desc = "Showing " + templateLabel(m.fInfraTemplate) + " defaults — edit to override · " + attrTypeHint
@@ -631,7 +639,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	default: // 3 — Span attrs
+	default: // 4 — Span attrs
 		desc := attrTypeHint
 		if m.fSpanAttrsSeed != "" && strings.TrimSpace(m.fSpanAttrs) == strings.TrimSpace(m.fSpanAttrsSeed) {
 			desc = "Showing " + templateLabel(m.fTemplate) + " defaults — edit to override · " + attrTypeHint
@@ -726,7 +734,7 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTab++
 		}
 
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		m.editTab = int(k.Runes[0] - '1')
 		m.tabActive = false
 		m.openServiceTab(m.editTab)
@@ -1020,16 +1028,32 @@ func (m *tui) sepLine() string {
 // tabBar renders the compact bar shown above an open form. It is also the top
 // of each selector view, so the two screens read as one continuous surface.
 func (m *tui) tabBar(names []string, active int) string {
-	var parts []string
+	// Full bar: every tab named. Falls back to numbers, then to the active tab
+	// alone, so the bar never wraps on a narrow terminal.
+	var full, numbered []string
 	for i, name := range names {
 		label := fmt.Sprintf("%d %s", i+1, name)
+		num := strconv.Itoa(i + 1)
 		if i == active {
-			parts = append(parts, sPrimaryBold.Render(label))
+			full = append(full, sPrimaryBold.Render(label))
+			numbered = append(numbered, sPrimaryBold.Render(label))
 		} else {
-			parts = append(parts, sMuted.Render(label))
+			full = append(full, sMuted.Render(label))
+			numbered = append(numbered, sMuted.Render(num))
 		}
 	}
-	return "  " + strings.Join(parts, sMuted.Render(" │ ")) + "\n  " + m.sepLine()
+
+	sep := sMuted.Render(" │ ")
+	for _, parts := range [][]string{full, numbered} {
+		bar := "  " + strings.Join(parts, sep)
+		if lipgloss.Width(bar) <= m.width {
+			return bar + "\n  " + m.sepLine()
+		}
+	}
+	bar := fmt.Sprintf("  %s  %s",
+		sMuted.Render(fmt.Sprintf("tab %d/%d", active+1, len(names))),
+		sPrimaryBold.Render(names[active]))
+	return bar + "\n  " + m.sepLine()
 }
 
 // serviceSelectorView lists the editor tabs with a summary of each one.
@@ -1068,7 +1092,7 @@ func (m *tui) serviceSelectorView() string {
 	}
 
 	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-4 open  ·  s save  ·  esc back"))
+	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-5 open  ·  s save  ·  esc back"))
 	rows = append(rows, sHelp.Render("  ~ inherited from template   ✎ your override"))
 	return strings.Join(rows, "\n")
 }
@@ -1094,19 +1118,19 @@ func (m *tui) serviceTabSummaries() []string {
 	}
 	settings += " · " + state
 
-	tmpl := "none"
-	switch {
-	case m.fTemplate != "" && m.fInfraTemplate != "":
-		tmpl = m.fTemplate + " · " + m.fInfraTemplate
-	case m.fTemplate != "":
-		tmpl = m.fTemplate + " · no infra"
-	case m.fInfraTemplate != "":
-		tmpl = "no span template · " + m.fInfraTemplate
+	spanTmpl := m.fTemplate
+	if spanTmpl == "" {
+		spanTmpl = sMuted.Render("none — generic spans")
+	}
+	infraTmpl := m.fInfraTemplate
+	if infraTmpl == "" {
+		infraTmpl = sMuted.Render("none")
 	}
 
 	return []string{
 		settings,
-		tmpl,
+		spanTmpl,
+		infraTmpl,
 		attrSummary(m.fAttrs, m.fAttrsSeed),
 		attrSummary(m.fSpanAttrs, m.fSpanAttrsSeed),
 	}
@@ -1184,7 +1208,7 @@ func (m *tui) helpView() string {
 		{"Service list", []row{
 			{"↑ ↓ / j k", "move between services"},
 			{"enter", "open the service editor (tab list)"},
-			{"1 2 3 4", "edit one tab directly, save on enter"},
+			{"1 – 5", "edit one tab directly, save on enter"},
 			{"n", "new service (guided through all tabs)"},
 			{"space", "enable / disable the service"},
 			{"d", "delete the service"},
@@ -1199,7 +1223,7 @@ func (m *tui) helpView() string {
 			{"q", "quit (stops the generator)"},
 		}},
 		{"Inside the editor", []row{
-			{"enter / 1-4", "open a tab"},
+			{"enter / 1-5", "open a tab"},
 			{"s", "save and return to the list"},
 			{"esc", "leave the form, then leave the editor"},
 			{"alt+enter", "new line inside an attribute textarea"},
@@ -1415,7 +1439,7 @@ func (m *tui) attrLine(label, mark string, attrs map[string]AttrValue) string {
 
 func (m *tui) renderHelp() string {
 	full := []string{
-		"n new", "↵ edit", "1-4 tab", "d delete", "␣ toggle",
+		"n new", "↵ edit", "1-5 tab", "d delete", "␣ toggle",
 		"r run/stop", "t test", "g config", "? help", "q quit",
 	}
 	medium := []string{"n new", "↵ edit", "r run/stop", "g config", "? help", "q quit"}

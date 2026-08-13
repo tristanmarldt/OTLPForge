@@ -18,7 +18,7 @@ Run it, point it at an endpoint, watch spans · metrics · logs flow. Useful for
   ○ flaky-worker  consumer  [messaging]  2s  80% err
     disabled — press space to enable
 
-  n new · ↵ edit · 1-5 tab · d delete · ␣ toggle · r run/stop · t test · g config · ? help · q quit
+  n new · ↵ edit · d delete · ␣ toggle · r run/stop · t test · g config · ? help · q quit
 ```
 
 ## Features
@@ -58,8 +58,7 @@ Press `?` in the app for the full reference.
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Navigate service list |
 | `↵` Enter | Open the service editor (tab list) |
-| `1` – `5` | Edit one tab directly, saves on submit |
-| `n` | New service (guided through every tab) |
+| `n` | Create a service |
 | `Space` | Toggle service enabled / disabled |
 | `d` | Delete service (with confirm) |
 | `r` | Start / stop sending |
@@ -71,15 +70,16 @@ Press `?` in the app for the full reference.
 
 ### Service editor
 
-The editor is split into five tabs, reachable from the tab list or directly with `1`–`5`:
+The editor is split into six tabs, reachable from the tab list or directly with `1`–`6`:
 
 | Tab | Contents |
 |-----|----------|
-| `1` Settings | Name, interval, failure rate, child spans, span kind, signals, enabled |
-| `2` Span template | HTTP server / client, database, messaging, gRPC |
-| `3` Infra template | Kubernetes (incl. EKS / GKE / AKS / OpenShift), containers, serverless, host |
-| `4` Resource attrs | Resource-level attributes |
-| `5` Span attrs | Span-level overrides for the span template |
+| `1` Settings | Name, interval, failure rate, child spans, span kind |
+| `2` Signals | Spans, metrics, logs |
+| `3` Span template | HTTP server / client, database, messaging, gRPC |
+| `4` Infra template | Kubernetes (incl. EKS / GKE / AKS / OpenShift), containers, serverless, host |
+| `5` Resource attrs | Resource-level overrides |
+| `6` Span attrs | Span-level overrides for the span template |
 
 The tab list shows a summary of each tab and flags unsaved changes. `s` saves,
 `Esc` backs out (and asks first if anything is unsaved).
@@ -88,14 +88,15 @@ From **inside** a tab you can switch without going back to the list:
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+O` / `Ctrl+R` | Next / previous tab |
+| `Ctrl+R` | Next tab |
 | `Esc` | Back to the tab list |
+| `x` | Toggle a signal on the Signals tab |
 
-`Ctrl+1`–`5` is deliberately not used: terminals cannot transmit it — `Ctrl+1`
+`Ctrl+1`–`6` is deliberately not used: terminals cannot transmit it — `Ctrl+1`
 sends nothing at all and `Ctrl+3` arrives as `Esc`.
 
-Attributes marked `~` are inherited from the selected template and keep tracking
-it; editing one turns it into an override, marked `✎`.
+Attributes marked `~` are inherited from the selected template. Attribute
+editors contain only explicit overrides, marked `✎`.
 
 ## Attributes
 
@@ -119,7 +120,8 @@ version="1.0"                # string (quoted to prevent numeric detection)
 | `OTGEN_TOKEN` | API token, overrides saved config |
 
 When either is set the header marks the affected field `[env]`, since the
-environment wins over anything entered in the UI.
+environment wins over anything entered in the UI. In global configuration,
+clearing the token field clears the saved token.
 
 Config is saved to `config.json` in the working directory.
 
@@ -132,4 +134,3 @@ otgen appends `/v1/traces`, `/v1/metrics`, `/v1/logs` automatically unless the U
 - Endpoint: `https://<env-id>.live.dynatrace.com/api/v2/otlp`
 - Token scopes required: `openTelemetryTrace.ingest`, `metrics.ingest`, `logs.ingest`
 - Tokens are auto-prefixed with `Api-Token ` for the `Authorization` header
-

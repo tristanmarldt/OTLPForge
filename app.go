@@ -166,7 +166,6 @@ func (a *App) updateSignalStatus(svcName string, kind signalKind, err error) {
 	if cur != nil {
 		if err == nil {
 			cur.SentCount++
-			cur.LastSentAt = time.Now().Format(time.RFC3339)
 			cur.LastError = ""
 		} else {
 			cur.LastError = err.Error()

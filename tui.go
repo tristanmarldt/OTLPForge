@@ -502,10 +502,15 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
 	switch tabIdx {
 	case 0: // Settings
+		// Inline fields keep this tab inside a 24-row terminal. huh cannot
+		// scroll a form that overflows (see makeServiceTabForm case 1), so the
+		// whole group has to fit. Titles are padded to a common width so the
+		// values line up.
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
-					Title("Service name").
+					Title(settingsLabel("Service name")).
+					Inline(true).
 					Value(&m.fName).
 					Validate(func(s string) error {
 						if strings.TrimSpace(s) == "" {
@@ -514,8 +519,8 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						return nil
 					}),
 				huh.NewInput().
-					Title("Interval (seconds)").
-					Description("How often this service emits a batch").
+					Title(settingsLabel("Interval (s)")).
+					Inline(true).
 					Value(&m.fInterval).
 					Validate(func(s string) error {
 						n, err := strconv.Atoi(strings.TrimSpace(s))
@@ -525,8 +530,8 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						return nil
 					}),
 				huh.NewInput().
-					Title("Failure rate (0–100 %)").
-					Description("Share of traces marked as errors").
+					Title(settingsLabel("Failure rate %")).
+					Inline(true).
 					Value(&m.fFailure).
 					Validate(func(s string) error {
 						n, err := strconv.Atoi(strings.TrimSpace(s))
@@ -536,8 +541,8 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						return nil
 					}),
 				huh.NewInput().
-					Title("Child spans (0–10)").
-					Description("Client spans nested under the root trace span").
+					Title(settingsLabel("Child spans")).
+					Inline(true).
 					Value(&m.fChildSpans).
 					Validate(func(s string) error {
 						n, err := strconv.Atoi(strings.TrimSpace(s))
@@ -547,8 +552,8 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						return nil
 					}),
 				huh.NewSelect[string]().
-					Title("Span kind").
-					Description("Kind of the root span").
+					Title(settingsLabel("Span kind")).
+					Inline(true).
 					Options(
 						huh.NewOption("server", "server"),
 						huh.NewOption("client", "client"),
@@ -557,6 +562,12 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						huh.NewOption("consumer", "consumer"),
 					).
 					Value(&m.fSpanKind),
+				huh.NewConfirm().
+					Title(settingsLabel("Enabled")).
+					Inline(true).
+					Affirmative("Yes").
+					Negative("No").
+					Value(&m.fEnabled),
 				huh.NewMultiSelect[string]().
 					Title("Signals").
 					Options(
@@ -565,11 +576,6 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						huh.NewOption("logs", "logs"),
 					).
 					Value(&m.fSignals),
-				huh.NewConfirm().
-					Title("Enabled").
-					Affirmative("Yes").
-					Negative("No").
-					Value(&m.fEnabled),
 			),
 		).WithWidth(w)
 
@@ -654,6 +660,15 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 	}
+}
+
+// settingsLabel pads a Settings-tab title so the inline values line up.
+func settingsLabel(s string) string {
+	const width = 16
+	if n := width - len([]rune(s)); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
 }
 
 func templateLabel(t string) string {

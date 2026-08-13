@@ -141,6 +141,32 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 	}
 }
 
+// TestEditorTabsFitStandardTerminal keeps every editor tab inside a classic
+// 24-row terminal. huh cannot scroll a form that overflows its group, so a tab
+// taller than the terminal has fields the user can focus but never see.
+func TestEditorTabsFitStandardTerminal(t *testing.T) {
+	const rows = 24
+
+	m := testTUI(t)
+	m.width, m.height = 100, rows
+	m.loadServiceFields(0)
+	m.screen = screenServiceEdit
+
+	for i, name := range serviceTabNames {
+		m.tabActive, m.editTab = false, i
+		m.openServiceTab(i)
+		m.form.Init()
+		if got := strings.Count(m.View(), "\n") + 1; got > rows {
+			t.Errorf("tab %d (%s) renders %d rows, exceeding a %d-row terminal", i+1, name, got, rows)
+		}
+	}
+
+	m.tabActive = true
+	if got := strings.Count(m.View(), "\n") + 1; got > rows {
+		t.Errorf("tab selector renders %d rows, exceeding a %d-row terminal", got, rows)
+	}
+}
+
 // TestTabBarFitsNarrowTerminals guards the tab bar against wrapping.
 func TestTabBarFitsNarrowTerminals(t *testing.T) {
 	m := testTUI(t)

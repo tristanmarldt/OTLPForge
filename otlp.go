@@ -22,7 +22,7 @@ import (
 func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 	now := time.Now()
 	resource := &resourcepb.Resource{Attributes: svcAttributes(svc)}
-	scope := &commonpb.InstrumentationScope{Name: "otlpforge", Version: "1.0.0"}
+	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
 
 	switch kind {
 	case signalSpans:
@@ -123,12 +123,12 @@ func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed b
 func applyFailure(span *tracepb.Span, failed bool) {
 	if !failed {
 		span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK}
-		span.Attributes = append(span.Attributes, stringAttr("otlpforge.outcome", "success"))
+		span.Attributes = append(span.Attributes, stringAttr("otgen.outcome", "success"))
 		return
 	}
 	span.Status = &tracepb.Status{Code: tracepb.Status_STATUS_CODE_ERROR, Message: "simulated failure"}
 	span.Attributes = append(span.Attributes,
-		stringAttr("otlpforge.outcome", "failure"),
+		stringAttr("otgen.outcome", "failure"),
 		stringAttr("error.type", "http_error"),
 		intAttr("http.response.status_code", 500),
 	)

@@ -1,5 +1,5 @@
 config.json
-otlpforge
+otgen
 run-docker-local.sh
 resource_attributes.json
 

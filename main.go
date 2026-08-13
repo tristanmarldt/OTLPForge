@@ -65,5 +65,5 @@ func tuiLogFile() string {
 	if err != nil {
 		dir = os.TempDir()
 	}
-	return filepath.Join(dir, "otlpforge.log")
+	return filepath.Join(dir, "otgen.log")
 }

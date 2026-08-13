@@ -193,7 +193,7 @@ func defaultConfig() Config {
 	return Config{
 		Interval: 5,
 		Services: []Service{{
-			Name:        "otlpforge",
+			Name:        "otgen",
 			SpanKind:    "server",
 			FailureRate: 5,
 			Signals:     []string{"spans", "metrics", "logs"},

@@ -590,7 +590,7 @@ func (m *tui) renderHeader() string {
 	} else {
 		indicator = sMuted.Render("○ stopped")
 	}
-	title := sPrimaryBold.Render("OTLPForge") + sMuted.Render(" v"+version)
+	title := sPrimaryBold.Render("otgen") + sMuted.Render(" v"+version)
 	line1 := title + "  " + indicator
 
 	ep := m.cfg.Endpoint

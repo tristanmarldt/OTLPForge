@@ -1,4 +1,4 @@
-module github.com/tristanmarldt/OTLPForge
+module github.com/tristanmarldt/otgen
 
 go 1.24.0
 

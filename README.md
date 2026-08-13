@@ -1,11 +1,11 @@
-# OTLPForge
+# otgen
 
 A lightweight synthetic OTLP data generator with a terminal UI.
 
 Run it, point it at an endpoint, watch spans · metrics · logs flow. Useful for testing Dynatrace ingest pipelines, validating dashboards, or load-testing collectors without needing a real application.
 
 ```
-OTLPForge v0.1.0  ● running
+otgen v0.1.0  ● running
   https://xxx.live.dynatrace.com/api/v2/otlp  interval: 5s
 ────────────────────────────────────────────────────────────────────────
 
@@ -31,8 +31,8 @@ OTLPForge v0.1.0  ● running
 ## Install
 
 ```bash
-go install github.com/tristanmarldt/OTLPForge@latest
-otlpforge
+go install github.com/tristanmarldt/otgen@latest
+otgen
 ```
 
 Press `g` to set your endpoint and token, `n` to add a service, `r` to start.
@@ -40,10 +40,10 @@ Press `g` to set your endpoint and token, `n` to add a service, `r` to start.
 ### Build from source
 
 ```bash
-git clone https://github.com/tristanmarldt/OTLPForge.git
-cd OTLPForge
-go build -o otlpforge .
-./otlpforge
+git clone https://github.com/tristanmarldt/otgen.git
+cd otgen
+go build -o otgen .
+./otgen
 ```
 
 Requires Go 1.24+.
@@ -89,7 +89,7 @@ Config is saved to `config.json` in the working directory. The token is always r
 
 ### Endpoint format
 
-OTLPForge appends `/v1/traces`, `/v1/metrics`, `/v1/logs` automatically unless the URL already contains a `/v1/` path.
+otgen appends `/v1/traces`, `/v1/metrics`, `/v1/logs` automatically unless the URL already contains a `/v1/` path.
 
 ### Dynatrace
 

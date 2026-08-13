@@ -50,7 +50,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprint(w, "OTLPForge\n\nGET  /api/config   read config\nPOST /api/config   write config\nPOST /api/start    start sending\nPOST /api/stop     stop sending\nGET  /api/status   runtime status\n")
+	fmt.Fprint(w, "otgen\n\nGET  /api/config   read config\nPOST /api/config   write config\nPOST /api/start    start sending\nPOST /api/stop     stop sending\nGET  /api/status   runtime status\n")
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {

@@ -28,27 +28,27 @@ jobs:
           for TARGET in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
             GOOS=${TARGET%/*}
             GOARCH=${TARGET#*/}
-            NAME="otlpforge_${GOOS}_${GOARCH}"
+            NAME="otgen_${GOOS}_${GOARCH}"
             echo "→ $GOOS/$GOARCH"
             if [ "$GOOS" = "windows" ]; then
               CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-                go build -trimpath -ldflags="$LDFLAGS" -o otlpforge.exe .
-              zip "${NAME}.zip" otlpforge.exe
-              rm otlpforge.exe
+                go build -trimpath -ldflags="$LDFLAGS" -o otgen.exe .
+              zip "${NAME}.zip" otgen.exe
+              rm otgen.exe
             else
               CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-                go build -trimpath -ldflags="$LDFLAGS" -o otlpforge .
-              tar -czf "${NAME}.tar.gz" otlpforge
-              rm otlpforge
+                go build -trimpath -ldflags="$LDFLAGS" -o otgen .
+              tar -czf "${NAME}.tar.gz" otgen
+              rm otgen
             fi
           done
-          sha256sum otlpforge_*.tar.gz otlpforge_*.zip > checksums.txt
+          sha256sum otgen_*.tar.gz otgen_*.zip > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            otlpforge_*.tar.gz
-            otlpforge_*.zip
+            otgen_*.tar.gz
+            otgen_*.zip
             checksums.txt

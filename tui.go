@@ -45,8 +45,6 @@ type tuiScreen int
 const (
 	screenList tuiScreen = iota
 	screenServiceEdit
-	screenAttrsEdit
-	screenSpanAttrsEdit
 	screenGlobal
 	screenGlobalAttrs
 	screenConfirmDelete
@@ -68,6 +66,7 @@ type tui struct {
 
 	form    *huh.Form
 	editIdx int // index in cfg.Services; -1 = new service
+	editTab int // active tab in screenServiceEdit (0–3)
 
 	// bound form fields – service editor
 	fName            string
@@ -148,6 +147,26 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.form = nil
 		return m, nil
 	}
+	if m.screen == screenServiceEdit {
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
+			case "ctrl+right":
+				if m.editTab < 3 {
+					m.editTab++
+					m.form = m.makeServiceTabForm(m.editTab)
+					return m, m.form.Init()
+				}
+				return m, nil
+			case "ctrl+left":
+				if m.editTab > 0 {
+					m.editTab--
+					m.form = m.makeServiceTabForm(m.editTab)
+					return m, m.form.Init()
+				}
+				return m, nil
+			}
+		}
+	}
 	newModel, cmd := m.form.Update(msg)
 	if f, ok := newModel.(*huh.Form); ok {
 		m.form = f
@@ -165,11 +184,12 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenServiceEdit:
+		if m.editTab < 3 {
+			m.editTab++
+			m.form = m.makeServiceTabForm(m.editTab)
+			return m, m.form.Init()
+		}
 		return m.commitService()
-	case screenAttrsEdit:
-		return m.commitAttrs()
-	case screenSpanAttrsEdit:
-		return m.commitSpanAttrs()
 	case screenGlobal:
 		return m.commitGlobal()
 	case screenGlobalAttrs:
@@ -213,12 +233,20 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "a":
 		if len(svcs) > 0 {
-			return m.openAttrsForm(m.cursor)
+			m.loadServiceFields(m.cursor)
+			m.editTab = 2
+			m.form = m.makeServiceTabForm(2)
+			m.screen = screenServiceEdit
+			return m, m.form.Init()
 		}
 
 	case "s":
 		if len(svcs) > 0 {
-			return m.openSpanAttrsForm(m.cursor)
+			m.loadServiceFields(m.cursor)
+			m.editTab = 3
+			m.form = m.makeServiceTabForm(3)
+			m.screen = screenServiceEdit
+			return m, m.form.Init()
 		}
 
 	case "d":
@@ -245,7 +273,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ── service form ──────────────────────────────────────────────────────────────
 
-func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
+func (m *tui) loadServiceFields(idx int) {
 	m.editIdx = idx
 	if idx == -1 {
 		m.fName = "otgen-"
@@ -274,138 +302,157 @@ func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 			m.fSignals = append([]string(nil), svc.Signals...)
 		}
 		m.fEnabled = svc.Enabled
-		// resource attrs: user attrs; seed from infra template defaults if empty
 		if len(svc.Attributes) > 0 {
 			m.fAttrs = attrsToText(svc.Attributes)
 		} else {
 			m.fAttrs = attrsToText(infraDefaults(svc))
 		}
-		// span attrs: show overrides; fall back to span template defaults when empty
 		if len(svc.SpanAttrs) > 0 {
 			m.fSpanAttrs = attrsToText(svc.SpanAttrs)
 		} else {
 			m.fSpanAttrs = attrsToText(templateDefaults(svc.Template))
 		}
 	}
+}
 
+func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
-	m.form = huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Service name").
-				Value(&m.fName).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("name is required")
-					}
-					return nil
-				}),
-			huh.NewSelect[string]().
-				Title("Span template").
-				Description("Pre-fills OTel semantic convention attributes on each span").
-				Options(
-					huh.NewOption("None (generic)", ""),
-					huh.NewOption("HTTP server", "http-server"),
-					huh.NewOption("HTTP client", "http-client"),
-					huh.NewOption("Database (db.*)", "db"),
-					huh.NewOption("Messaging (Kafka/RabbitMQ/SQS)", "messaging"),
-					huh.NewOption("gRPC", "grpc"),
-				).
-				Value(&m.fTemplate),
-			huh.NewSelect[string]().
-				Title("Infrastructure template").
-				Description("Pre-fills resource attributes for the deployment environment").
-				Options(
-					huh.NewOption("None", ""),
-					huh.NewOption("Kubernetes (k8s.*)", "k8s"),
-					huh.NewOption("Amazon EKS (k8s.* + aws)", "eks"),
-					huh.NewOption("Google GKE (k8s.* + gcp)", "gke"),
-					huh.NewOption("Azure AKS (k8s.* + azure)", "aks"),
-					huh.NewOption("Red Hat OpenShift (k8s.* + openshift)", "openshift"),
-					huh.NewOption("Amazon ECS / Fargate", "ecs"),
-					huh.NewOption("Host / VM (host.*, os.*)", "host"),
-					huh.NewOption("Docker (container.*)", "docker"),
-					huh.NewOption("containerd (container.runtime=containerd)", "containerd"),
-					huh.NewOption("AWS Lambda / FaaS", "lambda"),
-					huh.NewOption("Azure Functions", "azure-functions"),
-					huh.NewOption("Google Cloud Functions", "gcp-functions"),
-					huh.NewOption("Azure Container Apps", "azure-container-apps"),
-					huh.NewOption("HashiCorp Nomad", "nomad"),
-					huh.NewOption("Cloud Foundry / Tanzu", "cloudfoundry"),
-					huh.NewOption("Process (process.*)", "process"),
-				).
-				Value(&m.fInfraTemplate),
-			huh.NewSelect[string]().
-				Title("Span kind").
-				Options(
-					huh.NewOption("server", "server"),
-					huh.NewOption("client", "client"),
-					huh.NewOption("internal", "internal"),
-					huh.NewOption("producer", "producer"),
-					huh.NewOption("consumer", "consumer"),
-				).
-				Value(&m.fSpanKind),
-			huh.NewInput().
-				Title("Failure rate (0–100 %)").
-				Value(&m.fFailure).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 0 || n > 100 {
-						return fmt.Errorf("must be a number 0–100")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Interval (seconds)").
-				Value(&m.fInterval).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 1 {
-						return fmt.Errorf("must be ≥ 1")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Child spans (0–10)").
-				Description("Client spans nested under the root trace span").
-				Value(&m.fChildSpans).
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n < 0 || n > 10 {
-						return fmt.Errorf("must be 0–10")
-					}
-					return nil
-				}),
-			huh.NewMultiSelect[string]().
-				Title("Signals").
-				Options(
-					huh.NewOption("spans", "spans"),
-					huh.NewOption("metrics", "metrics"),
-					huh.NewOption("logs", "logs"),
-				).
-				Value(&m.fSignals),
-			huh.NewConfirm().
-				Title("Enabled").
-				Affirmative("Yes").
-				Negative("No").
-				Value(&m.fEnabled),
-		),
-		huh.NewGroup(
-			huh.NewText().
-				Title("Resource attributes").
-				Description("key=value per line · true/false→bool · 42→int · 3.14→double · \"42\"→string · esc: cancel").
-				Lines(6).
-				Value(&m.fAttrs),
-		),
-		huh.NewGroup(
-			huh.NewText().
-				Title("Span attribute overrides").
-				Description("Override or add span-level semantic-convention attributes from the template · esc: cancel").
-				Lines(8).
-				Value(&m.fSpanAttrs),
-		),
-	).WithWidth(w)
+	switch tabIdx {
+	case 0: // Settings
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Service name").
+					Value(&m.fName).
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return fmt.Errorf("name is required")
+						}
+						return nil
+					}),
+				huh.NewSelect[string]().
+					Title("Span kind").
+					Options(
+						huh.NewOption("server", "server"),
+						huh.NewOption("client", "client"),
+						huh.NewOption("internal", "internal"),
+						huh.NewOption("producer", "producer"),
+						huh.NewOption("consumer", "consumer"),
+					).
+					Value(&m.fSpanKind),
+				huh.NewInput().
+					Title("Failure rate (0–100 %)").
+					Value(&m.fFailure).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n < 0 || n > 100 {
+							return fmt.Errorf("must be a number 0–100")
+						}
+						return nil
+					}),
+				huh.NewInput().
+					Title("Interval (seconds)").
+					Value(&m.fInterval).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n < 1 {
+							return fmt.Errorf("must be ≥ 1")
+						}
+						return nil
+					}),
+				huh.NewInput().
+					Title("Child spans (0–10)").
+					Description("Client spans nested under the root trace span").
+					Value(&m.fChildSpans).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n < 0 || n > 10 {
+							return fmt.Errorf("must be 0–10")
+						}
+						return nil
+					}),
+				huh.NewMultiSelect[string]().
+					Title("Signals").
+					Options(
+						huh.NewOption("spans", "spans"),
+						huh.NewOption("metrics", "metrics"),
+						huh.NewOption("logs", "logs"),
+					).
+					Value(&m.fSignals),
+				huh.NewConfirm().
+					Title("Enabled").
+					Affirmative("Yes").
+					Negative("No").
+					Value(&m.fEnabled),
+			),
+		).WithWidth(w)
+	case 1: // Templates
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Span template").
+					Description("Pre-fills OTel semantic convention attributes on each span").
+					Options(
+						huh.NewOption("None (generic)", ""),
+						huh.NewOption("HTTP server", "http-server"),
+						huh.NewOption("HTTP client", "http-client"),
+						huh.NewOption("Database (db.*)", "db"),
+						huh.NewOption("Messaging (Kafka/RabbitMQ/SQS)", "messaging"),
+						huh.NewOption("gRPC", "grpc"),
+					).
+					Value(&m.fTemplate),
+				huh.NewSelect[string]().
+					Title("Infrastructure template").
+					Description("Pre-fills resource attributes for the deployment environment").
+					Options(
+						huh.NewOption("None", ""),
+						huh.NewOption("Kubernetes (k8s.*)", "k8s"),
+						huh.NewOption("Amazon EKS (k8s.* + aws)", "eks"),
+						huh.NewOption("Google GKE (k8s.* + gcp)", "gke"),
+						huh.NewOption("Azure AKS (k8s.* + azure)", "aks"),
+						huh.NewOption("Red Hat OpenShift (k8s.* + openshift)", "openshift"),
+						huh.NewOption("Amazon ECS / Fargate", "ecs"),
+						huh.NewOption("Host / VM (host.*, os.*)", "host"),
+						huh.NewOption("Docker (container.*)", "docker"),
+						huh.NewOption("containerd (container.runtime=containerd)", "containerd"),
+						huh.NewOption("AWS Lambda / FaaS", "lambda"),
+						huh.NewOption("Azure Functions", "azure-functions"),
+						huh.NewOption("Google Cloud Functions", "gcp-functions"),
+						huh.NewOption("Azure Container Apps", "azure-container-apps"),
+						huh.NewOption("HashiCorp Nomad", "nomad"),
+						huh.NewOption("Cloud Foundry / Tanzu", "cloudfoundry"),
+						huh.NewOption("Process (process.*)", "process"),
+					).
+					Value(&m.fInfraTemplate),
+			),
+		).WithWidth(w)
+	case 2: // Resource attrs
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewText().
+					Title("Resource attributes").
+					Description("key=value per line · true/false→bool · 42→int · 3.14→double · \"42\"→string · esc: cancel").
+					Lines(12).
+					Value(&m.fAttrs),
+			),
+		).WithWidth(w)
+	default: // 3 — Span attrs
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewText().
+					Title("Span attribute overrides").
+					Description("Override or add span-level semantic-convention attributes from the template · esc: cancel").
+					Lines(12).
+					Value(&m.fSpanAttrs),
+			),
+		).WithWidth(w)
+	}
+}
 
+func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
+	m.loadServiceFields(idx)
+	m.editTab = 0
+	m.form = m.makeServiceTabForm(0)
 	m.screen = screenServiceEdit
 	return m, m.form.Init()
 }
@@ -448,103 +495,6 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 	} else {
 		m.cfg = cfg
 		m.setFlash("saved", false)
-	}
-	return m, nil
-}
-
-// ── attributes quick-edit form ────────────────────────────────────────────────
-
-func (m *tui) openAttrsForm(idx int) (tea.Model, tea.Cmd) {
-	m.editIdx = idx
-	svc := m.cfg.Services[idx]
-	// Seed with existing attrs; fall back to infra template defaults when empty.
-	if len(svc.Attributes) > 0 {
-		m.fAttrs = attrsToText(svc.Attributes)
-	} else {
-		m.fAttrs = attrsToText(infraDefaults(svc))
-	}
-
-	m.form = huh.NewForm(
-		huh.NewGroup(
-			huh.NewText().
-				Title(fmt.Sprintf("Attributes — %s", svc.Name)).
-				Description("key=value per line · true/false→bool · 42→int · 3.14→double · \"42\"→string · esc: cancel").
-				Lines(12).
-				Value(&m.fAttrs),
-		),
-	).WithWidth(m.formWidth())
-
-	m.screen = screenAttrsEdit
-	return m, m.form.Init()
-}
-
-func (m *tui) commitAttrs() (tea.Model, tea.Cmd) {
-	m.screen = screenList
-	m.form = nil
-
-	svcs := make([]Service, len(m.cfg.Services))
-	copy(svcs, m.cfg.Services)
-	svcs[m.editIdx].Attributes = parseAttrs(m.fAttrs)
-
-	cfg := m.cfg
-	cfg.Services = svcs
-	if err := m.app.SetConfig(cfg); err != nil {
-		m.setFlash("error: "+err.Error(), true)
-	} else {
-		m.cfg = cfg
-		m.setFlash("attributes saved", false)
-	}
-	return m, nil
-}
-
-// ── span attributes quick-edit form ──────────────────────────────────────────
-
-func (m *tui) openSpanAttrsForm(idx int) (tea.Model, tea.Cmd) {
-	m.editIdx = idx
-	svc := m.cfg.Services[idx]
-
-	// Seed with existing overrides, or with template defaults if none set yet.
-	if len(svc.SpanAttrs) > 0 {
-		m.fSpanAttrs = attrsToText(svc.SpanAttrs)
-	} else {
-		m.fSpanAttrs = attrsToText(templateDefaults(svc.Template))
-	}
-
-	title := fmt.Sprintf("Span attrs — %s", svc.Name)
-	desc := "Override span-level semantic-convention attributes from the template · esc: cancel"
-	if svc.Template == "" {
-		desc = "No template active — attributes are added directly to each span · esc: cancel"
-	}
-
-	m.form = huh.NewForm(
-		huh.NewGroup(
-			huh.NewText().
-				Title(title).
-				Description(desc).
-				Lines(12).
-				Value(&m.fSpanAttrs),
-		),
-	).WithWidth(m.formWidth())
-
-	m.screen = screenSpanAttrsEdit
-	return m, m.form.Init()
-}
-
-func (m *tui) commitSpanAttrs() (tea.Model, tea.Cmd) {
-	m.screen = screenList
-	m.form = nil
-
-	svcs := make([]Service, len(m.cfg.Services))
-	copy(svcs, m.cfg.Services)
-	svcs[m.editIdx].SpanAttrs = parseAttrs(m.fSpanAttrs)
-
-	cfg := m.cfg
-	cfg.Services = svcs
-	if err := m.app.SetConfig(cfg); err != nil {
-		m.setFlash("error: "+err.Error(), true)
-	} else {
-		m.cfg = cfg
-		m.setFlash("span attributes saved", false)
 	}
 	return m, nil
 }
@@ -722,11 +672,30 @@ func (m *tui) setFlash(msg string, isErr bool) {
 
 // ── view ──────────────────────────────────────────────────────────────────────
 
+func (m *tui) renderServiceTabBar() string {
+	names := []string{"Settings", "Templates", "Resource attrs", "Span attrs"}
+	var parts []string
+	for i, name := range names {
+		if i == m.editTab {
+			parts = append(parts, sPrimaryBold.Render(" "+name+" "))
+		} else {
+			parts = append(parts, sMuted.Render(" "+name+" "))
+		}
+	}
+	bar := strings.Join(parts, sMuted.Render("│"))
+	nav := sMuted.Render("  ctrl+←→ switch tab  ·  esc cancel")
+	sep := sMuted.Render(strings.Repeat("─", min(m.width-4, 68)))
+	return "  " + bar + "\n  " + sep + "\n" + nav
+}
+
 func (m *tui) View() string {
 	if m.width == 0 {
 		return "Loading…"
 	}
 	if m.form != nil && m.screen != screenList {
+		if m.screen == screenServiceEdit {
+			return m.renderServiceTabBar() + "\n" + m.form.View()
+		}
 		return m.form.View()
 	}
 	return m.listView()

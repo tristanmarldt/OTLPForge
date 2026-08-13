@@ -64,9 +64,11 @@ type tui struct {
 	cfg     Config
 	status  RuntimeStatus
 
-	form    *huh.Form
-	editIdx int // index in cfg.Services; -1 = new service
-	editTab int // active tab in screenServiceEdit (0–3)
+	form         *huh.Form
+	editIdx      int  // index in cfg.Services; -1 = new service
+	editTab      int  // active tab in screenServiceEdit (0–3)
+	tabBarActive bool // true = tab bar has focus (arrow nav); false = huh form has focus
+	quickEdit    bool // true = save immediately on form completion (opened via a/s)
 
 	// bound form fields – service editor
 	fName            string
@@ -137,36 +139,28 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── form delegation ───────────────────────────────────────────────────────────
 
 func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Tab bar focus mode: arrow-key navigation between tabs.
+	if m.screen == screenServiceEdit && m.tabBarActive {
+		return m.updateTabBar(msg)
+	}
+
 	if m.form == nil {
 		m.screen = screenList
 		return m, nil
 	}
-	// Esc always cancels and returns to the list without saving.
+
+	// Esc: service edit goes to tab bar; everything else returns to list.
 	if k, ok := msg.(tea.KeyMsg); ok && k.Type == tea.KeyEsc {
+		if m.screen == screenServiceEdit {
+			m.tabBarActive = true
+			m.form = nil
+			return m, nil
+		}
 		m.screen = screenList
 		m.form = nil
 		return m, nil
 	}
-	if m.screen == screenServiceEdit {
-		if k, ok := msg.(tea.KeyMsg); ok {
-			switch k.String() {
-			case "ctrl+right":
-				if m.editTab < 3 {
-					m.editTab++
-					m.form = m.makeServiceTabForm(m.editTab)
-					return m, m.form.Init()
-				}
-				return m, nil
-			case "ctrl+left":
-				if m.editTab > 0 {
-					m.editTab--
-					m.form = m.makeServiceTabForm(m.editTab)
-					return m, m.form.Init()
-				}
-				return m, nil
-			}
-		}
-	}
+
 	newModel, cmd := m.form.Update(msg)
 	if f, ok := newModel.(*huh.Form); ok {
 		m.form = f
@@ -175,16 +169,58 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case huh.StateCompleted:
 		return m.commitForm()
 	case huh.StateAborted:
-		m.screen = screenList
-		m.form = nil
+		if m.screen == screenServiceEdit {
+			m.tabBarActive = true
+			m.form = nil
+		} else {
+			m.screen = screenList
+			m.form = nil
+		}
 	}
 	return m, cmd
+}
+
+// updateTabBar handles key input when the tab bar has focus (service edit only).
+func (m *tui) updateTabBar(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch k.String() {
+	case "esc":
+		m.screen = screenList
+		m.tabBarActive = false
+		return m, nil
+	case "up", "k", "left", "h":
+		if m.editTab > 0 {
+			m.editTab--
+		}
+	case "down", "j", "right", "l":
+		if m.editTab < 3 {
+			m.editTab++
+		}
+	case "1", "2", "3", "4":
+		m.editTab = int(k.Runes[0]-'1')
+		m.tabBarActive = false
+		m.form = m.makeServiceTabForm(m.editTab)
+		return m, m.form.Init()
+	case "enter", " ":
+		m.tabBarActive = false
+		m.form = m.makeServiceTabForm(m.editTab)
+		return m, m.form.Init()
+	}
+	return m, nil
 }
 
 func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenServiceEdit:
+		if m.quickEdit {
+			// Quick edit (a/s): save immediately without cycling through other tabs.
+			return m.commitService()
+		}
 		if m.editTab < 3 {
+			// Full edit: advance to next tab automatically.
 			m.editTab++
 			m.form = m.makeServiceTabForm(m.editTab)
 			return m, m.form.Init()
@@ -235,6 +271,8 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(svcs) > 0 {
 			m.loadServiceFields(m.cursor)
 			m.editTab = 2
+			m.tabBarActive = false
+			m.quickEdit = true
 			m.form = m.makeServiceTabForm(2)
 			m.screen = screenServiceEdit
 			return m, m.form.Init()
@@ -244,6 +282,8 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(svcs) > 0 {
 			m.loadServiceFields(m.cursor)
 			m.editTab = 3
+			m.tabBarActive = false
+			m.quickEdit = true
 			m.form = m.makeServiceTabForm(3)
 			m.screen = screenServiceEdit
 			return m, m.form.Init()
@@ -452,6 +492,8 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 func (m *tui) openServiceForm(idx int) (tea.Model, tea.Cmd) {
 	m.loadServiceFields(idx)
 	m.editTab = 0
+	m.tabBarActive = false
+	m.quickEdit = false
 	m.form = m.makeServiceTabForm(0)
 	m.screen = screenServiceEdit
 	return m, m.form.Init()
@@ -672,8 +714,34 @@ func (m *tui) setFlash(msg string, isErr bool) {
 
 // ── view ──────────────────────────────────────────────────────────────────────
 
-func (m *tui) renderServiceTabBar() string {
+// renderTabSelector renders the tab bar in navigation mode (tab bar has focus).
+// Arrow keys / 1-4 move the selection; Enter opens the form.
+func (m *tui) renderTabSelector() string {
 	names := []string{"Settings", "Templates", "Resource attrs", "Span attrs"}
+	svcName := ""
+	if m.editIdx >= 0 && m.editIdx < len(m.cfg.Services) {
+		svcName = " — " + m.cfg.Services[m.editIdx].Name
+	}
+	title := sPrimaryBold.Render("  Edit service") + sMuted.Render(svcName)
+	sep := sMuted.Render("  " + strings.Repeat("─", min(m.width-4, 68)))
+	var rows []string
+	rows = append(rows, title, sep, "")
+	for i, name := range names {
+		num := strconv.Itoa(i + 1)
+		if i == m.editTab {
+			rows = append(rows, sPrimary.Render("  ▶ ")+sPrimaryBold.Render(num+" "+name))
+		} else {
+			rows = append(rows, sMuted.Render("    "+num+" "+name))
+		}
+	}
+	rows = append(rows, "")
+	rows = append(rows, sMuted.Render("  ↑↓ ←→  navigate  ·  enter / 1-4: open  ·  esc: cancel"))
+	return strings.Join(rows, "\n")
+}
+
+// renderServiceTabBar renders the compact tab bar shown above the active form.
+func (m *tui) renderServiceTabBar() string {
+	names := []string{"1 Settings", "2 Templates", "3 Resource attrs", "4 Span attrs"}
 	var parts []string
 	for i, name := range names {
 		if i == m.editTab {
@@ -683,19 +751,24 @@ func (m *tui) renderServiceTabBar() string {
 		}
 	}
 	bar := strings.Join(parts, sMuted.Render("│"))
-	nav := sMuted.Render("  ctrl+←→ switch tab  ·  esc cancel")
+	hint := sMuted.Render("  esc: back to tab list")
 	sep := sMuted.Render(strings.Repeat("─", min(m.width-4, 68)))
-	return "  " + bar + "\n  " + sep + "\n" + nav
+	return "  " + bar + "\n  " + sep + "\n" + hint
 }
 
 func (m *tui) View() string {
 	if m.width == 0 {
 		return "Loading…"
 	}
-	if m.form != nil && m.screen != screenList {
-		if m.screen == screenServiceEdit {
+	if m.screen == screenServiceEdit {
+		if m.tabBarActive {
+			return m.renderTabSelector()
+		}
+		if m.form != nil {
 			return m.renderServiceTabBar() + "\n" + m.form.View()
 		}
+	}
+	if m.form != nil && m.screen != screenList {
 		return m.form.View()
 	}
 	return m.listView()

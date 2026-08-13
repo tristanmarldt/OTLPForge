@@ -98,19 +98,9 @@ func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
 // Precedence (high → low): service.name > svc.Attributes > infraDefaults > cfg.Attributes (global).
 func svcAttributes(cfg Config, svc Service) []*commonpb.KeyValue {
 	merged := make(map[string]AttrValue, len(cfg.Attributes)+len(svc.Attributes)+8)
-	// 1. global attrs (lowest priority)
-	for k, v := range cfg.Attributes {
-		merged[k] = v
-	}
-	// 2. infra template defaults
-	for k, v := range infraDefaults(svc) {
-		merged[k] = v
-	}
-	// 3. per-service resource attrs
-	for k, v := range svc.Attributes {
-		merged[k] = v
-	}
-	// 4. service.name always wins
+	mergeAttrs(merged, cfg.Attributes)
+	mergeAttrs(merged, infraDefaults(svc))
+	mergeAttrs(merged, svc.Attributes)
 	merged["service.name"] = strAttrVal(svc.Name)
 	return toOTLPAttributes(merged)
 }

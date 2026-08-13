@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -194,7 +193,7 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == screenServiceEdit && k.String() == "ctrl+r" {
 			m.editTab = (m.editTab + 1) % len(serviceTabNames)
-			m.openServiceTab(m.editTab)
+			m.form = m.makeServiceTabForm(m.editTab)
 			return m, m.form.Init()
 		}
 	}
@@ -214,17 +213,12 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // leaveForm handles Esc / abort out of an open form.
 func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
-	switch m.screen {
-	case screenServiceEdit:
+	if m.screen == screenServiceEdit {
 		m.tabActive = true
-		m.form = nil
-	case screenGlobal:
+	} else {
 		m.screen = screenList
-		m.form = nil
-	default:
-		m.screen = screenList
-		m.form = nil
 	}
+	m.form = nil
 	return m, nil
 }
 
@@ -272,7 +266,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.tabActive = false
 		m.editTab = 0
 		m.screen = screenServiceEdit
-		m.openServiceTab(0)
+		m.form = m.makeServiceTabForm(0)
 		return m, m.form.Init()
 
 	case "enter":
@@ -396,10 +390,6 @@ func (m *tui) hasUnsavedChanges() bool {
 // ── service editor: forms ─────────────────────────────────────────────────────
 
 const attrTypeHint = "key=value · bool/number auto-detected · quote strings"
-
-func (m *tui) openServiceTab(tabIdx int) {
-	m.form = m.makeServiceTabForm(tabIdx)
-}
 
 func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
@@ -556,11 +546,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 
 // settingsLabel pads a Settings-tab title so the inline values line up.
 func settingsLabel(s string) string {
-	const width = 16
-	if n := width - len([]rune(s)); n > 0 {
-		return s + strings.Repeat(" ", n)
-	}
-	return s
+	return fmt.Sprintf("%-16s", s)
 }
 
 func (m *tui) commitService() (tea.Model, tea.Cmd) {
@@ -632,12 +618,12 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4", "5", "6":
 		m.editTab = int(k.Runes[0] - '1')
 		m.tabActive = false
-		m.openServiceTab(m.editTab)
+		m.form = m.makeServiceTabForm(m.editTab)
 		return m, m.form.Init()
 
 	case "enter", " ":
 		m.tabActive = false
-		m.openServiceTab(m.editTab)
+		m.form = m.makeServiceTabForm(m.editTab)
 		return m, m.form.Init()
 	}
 	return m, nil
@@ -830,7 +816,7 @@ func (m *tui) View() string {
 			return m.serviceSelectorView()
 		}
 		if m.form != nil {
-			return m.tabBar(serviceTabNames, m.editTab) + "\n" + m.tabSwitchHint() + "\n" + m.form.View()
+			return m.tabBar(m.editTab) + "\n" + sHelp.Render("  ctrl+r next tab · esc tab list") + "\n" + m.form.View()
 		}
 
 	case screenGlobal:
@@ -859,11 +845,11 @@ func (m *tui) sepLine() string {
 
 // tabBar renders the compact bar shown above an open form. It is also the top
 // of each selector view, so the two screens read as one continuous surface.
-func (m *tui) tabBar(names []string, active int) string {
+func (m *tui) tabBar(active int) string {
 	// Full bar: every tab named. Falls back to numbers, then to the active tab
 	// alone, so the bar never wraps on a narrow terminal.
 	var full, numbered []string
-	for i, name := range names {
+	for i, name := range serviceTabNames {
 		label := fmt.Sprintf("%d %s", i+1, name)
 		num := strconv.Itoa(i + 1)
 		if i == active {
@@ -883,15 +869,9 @@ func (m *tui) tabBar(names []string, active int) string {
 		}
 	}
 	bar := fmt.Sprintf("  %s  %s",
-		sMuted.Render(fmt.Sprintf("tab %d/%d", active+1, len(names))),
-		sPrimaryBold.Render(names[active]))
+		sMuted.Render(fmt.Sprintf("tab %d/%d", active+1, len(serviceTabNames))),
+		sPrimaryBold.Render(serviceTabNames[active]))
 	return bar + "\n  " + m.sepLine()
-}
-
-// tabSwitchHint is shown under the tab bar while a form is focused, so the
-// in-form switch keys are discoverable without opening the help overlay.
-func (m *tui) tabSwitchHint() string {
-	return sHelp.Render("  ctrl+r next tab · esc tab list")
 }
 
 // serviceSelectorView lists the editor tabs with a summary of each one.
@@ -899,7 +879,7 @@ func (m *tui) serviceSelectorView() string {
 	summaries := m.serviceTabSummaries()
 
 	var rows []string
-	rows = append(rows, m.tabBar(serviceTabNames, m.editTab))
+	rows = append(rows, m.tabBar(m.editTab))
 
 	name := strings.TrimSpace(m.fName)
 	if name == "" {
@@ -1014,7 +994,7 @@ func (m *tui) listView() string {
 		rows = append(rows, sMuted.Render("  No services yet — press n to create one."))
 	} else {
 		for i, svc := range m.cfg.Services {
-			rows = append(rows, m.renderService(i, svc, i == m.cursor))
+			rows = append(rows, m.renderService(svc, i == m.cursor))
 		}
 	}
 
@@ -1080,7 +1060,7 @@ func (m *tui) renderHeader() string {
 
 // renderService draws one service. The cursored row is expanded with its
 // effective resource and span attributes; the others stay compact.
-func (m *tui) renderService(i int, svc Service, expanded bool) string {
+func (m *tui) renderService(svc Service, expanded bool) string {
 	cursor := "  "
 	name := svc.Name
 	if expanded {
@@ -1143,22 +1123,13 @@ func (m *tui) renderService(i int, svc Service, expanded bool) string {
 	}
 
 	// Expanded: show the attributes that will actually be emitted.
-	resAttrs := map[string]AttrValue{}
+	resAttrs := make(map[string]AttrValue, len(m.cfg.Attributes)+len(svc.Attributes)+8)
+	mergeAttrs(resAttrs, m.cfg.Attributes)
 	mergeAttrs(resAttrs, infraDefaults(svc))
 	mergeAttrs(resAttrs, svc.Attributes)
 	resMark := "✎"
 	if len(svc.Attributes) == 0 {
 		resMark = "~"
-	}
-	if len(m.cfg.Attributes) > 0 {
-		merged := make(map[string]AttrValue, len(resAttrs)+len(m.cfg.Attributes))
-		for k, v := range m.cfg.Attributes {
-			merged[k] = v
-		}
-		for k, v := range resAttrs {
-			merged[k] = v
-		}
-		resAttrs = merged
 	}
 	lines = append(lines, m.attrLine("res ", resMark, resAttrs))
 
@@ -1353,36 +1324,19 @@ func parseAttrValue(v string) AttrValue {
 	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
 		return strAttrVal(v[1 : len(v)-1])
 	}
-	// 3 & 4. Number: walk the rune set to distinguish int from double.
-	if looksNumeric(v) {
-		if strings.ContainsAny(v, ".eE") {
-			if fv, err := strconv.ParseFloat(v, 64); err == nil {
-				return doubleAttrVal(fv)
-			}
-		} else {
-			if iv, err := strconv.ParseInt(v, 10, 64); err == nil {
-				return intAttrVal(iv)
-			}
+	// 3 & 4. Number. Keep the first-digit check so values such as +1 and .5
+	// retain their established string interpretation.
+	numeric := strings.TrimPrefix(v, "-")
+	if numeric != "" && numeric[0] >= '0' && numeric[0] <= '9' {
+		if iv, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return intAttrVal(iv)
+		}
+		if fv, err := strconv.ParseFloat(v, 64); err == nil && strings.ContainsAny(v, ".eE") {
+			return doubleAttrVal(fv)
 		}
 	}
 	// 5. Fallback: string
 	return strAttrVal(v)
-}
-
-// looksNumeric returns true if s starts with an optional minus sign followed
-// by at least one ASCII digit.
-func looksNumeric(s string) bool {
-	if s == "" {
-		return false
-	}
-	i := 0
-	if s[0] == '-' {
-		i = 1
-	}
-	if i >= len(s) {
-		return false
-	}
-	return unicode.IsDigit(rune(s[i]))
 }
 
 // ── misc ──────────────────────────────────────────────────────────────────────

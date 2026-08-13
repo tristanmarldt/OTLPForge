@@ -160,7 +160,7 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 		m.editTab = tc.tab
 		m.tabActive = false
 		m.screen = screenServiceEdit
-		m.openServiceTab(tc.tab)
+		m.form = m.makeServiceTabForm(tc.tab)
 		m.form.Init()
 
 		view := m.View()
@@ -186,7 +186,7 @@ func TestEditorTabsFitStandardTerminal(t *testing.T) {
 
 	for i, name := range serviceTabNames {
 		m.tabActive, m.editTab = false, i
-		m.openServiceTab(i)
+		m.form = m.makeServiceTabForm(i)
 		m.form.Init()
 		if got := strings.Count(m.View(), "\n") + 1; got > rows {
 			t.Errorf("tab %d (%s) renders %d rows, exceeding a %d-row terminal", i+1, name, got, rows)
@@ -210,7 +210,7 @@ func TestCtrlRMovesToNextTab(t *testing.T) {
 	m := testTUI(t)
 	m.loadServiceFields(0)
 	m.screen, m.tabActive, m.editTab = screenServiceEdit, false, 0
-	m.openServiceTab(0)
+	m.form = m.makeServiceTabForm(0)
 
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
 	if m.editTab != 1 {
@@ -224,7 +224,7 @@ func TestTabBarFitsNarrowTerminals(t *testing.T) {
 	for _, w := range []int{40, 60, 80, 100, 160} {
 		m.width = w
 		for active := range serviceTabNames {
-			bar := strings.SplitN(m.tabBar(serviceTabNames, active), "\n", 2)[0]
+			bar := strings.SplitN(m.tabBar(active), "\n", 2)[0]
 			if got := len([]rune(stripANSI(bar))); got > w {
 				t.Errorf("tab bar is %d cols at width %d (active %d): %q", got, w, active, bar)
 			}

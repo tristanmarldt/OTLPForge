@@ -207,7 +207,8 @@ func normalizeService(svc Service) Service {
 		svc.Template = ""
 	}
 	switch svc.InfraTemplate {
-	case "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process":
+	case "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process",
+		"openshift", "containerd", "nomad", "azure-functions", "gcp-functions", "azure-container-apps":
 		// valid
 	default:
 		svc.InfraTemplate = ""

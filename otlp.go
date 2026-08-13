@@ -226,6 +226,68 @@ func infraDefaults(svc Service) map[string]AttrValue {
 			"process.runtime.version": strAttrVal("1.24.0"),
 			"host.name":               strAttrVal("localhost"),
 		}
+
+	case "openshift":
+		return map[string]AttrValue{
+			"k8s.cluster.name":    strAttrVal("my-ocp-cluster"),
+			"k8s.namespace.name":  strAttrVal("default"),
+			"k8s.pod.name":        strAttrVal(name + "-7d9f8b6c4-xzpqr"),
+			"k8s.node.name":       strAttrVal("ocp-worker-1"),
+			"k8s.deployment.name": strAttrVal(name),
+			"k8s.container.name":  strAttrVal(name),
+			"cloud.platform":      strAttrVal("openshift"),
+		}
+
+	case "containerd":
+		return map[string]AttrValue{
+			"container.runtime":    strAttrVal("containerd"),
+			"container.name":       strAttrVal(name),
+			"container.id":         strAttrVal("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
+			"container.image.name": strAttrVal(name),
+			"container.image.tag":  strAttrVal("latest"),
+			"host.name":            strAttrVal("containerd-host-01"),
+		}
+
+	case "nomad":
+		return map[string]AttrValue{
+			"nomad.job.name":   strAttrVal(name),
+			"nomad.task.name":  strAttrVal(name + "-task"),
+			"nomad.namespace":  strAttrVal("default"),
+			"nomad.datacenter": strAttrVal("dc1"),
+			"nomad.alloc.id":   strAttrVal("abc12345-def6-7890-abcd-ef1234567890"),
+		}
+
+	case "azure-functions":
+		return map[string]AttrValue{
+			"cloud.provider":  strAttrVal("azure"),
+			"cloud.platform":  strAttrVal("azure_functions"),
+			"cloud.region":    strAttrVal("westeurope"),
+			"cloud.account.id": strAttrVal("12345678-1234-1234-1234-123456789012"),
+			"faas.name":       strAttrVal(name),
+			"faas.version":    strAttrVal("1.0.0"),
+		}
+
+	case "gcp-functions":
+		return map[string]AttrValue{
+			"cloud.provider":  strAttrVal("gcp"),
+			"cloud.platform":  strAttrVal("gcp_cloud_functions"),
+			"cloud.region":    strAttrVal("europe-west1"),
+			"cloud.account.id": strAttrVal("my-gcp-project"),
+			"faas.name":       strAttrVal(name),
+			"faas.version":    strAttrVal("1"),
+		}
+
+	case "azure-container-apps":
+		return map[string]AttrValue{
+			"cloud.provider":       strAttrVal("azure"),
+			"cloud.platform":       strAttrVal("azure_container_apps"),
+			"cloud.region":         strAttrVal("westeurope"),
+			"cloud.account.id":     strAttrVal("12345678-1234-1234-1234-123456789012"),
+			"container.name":       strAttrVal(name),
+			"container.image.name": strAttrVal(name),
+			"container.image.tag":  strAttrVal("latest"),
+			"k8s.namespace.name":   strAttrVal(name + "-app"),
+		}
 	}
 
 	return nil

@@ -158,23 +158,9 @@ func (svc Service) hasSignal(kind signalKind) bool {
 	return false
 }
 
-// redacted returns a copy of the config with the token cleared.
-func (cfg Config) redacted() Config {
-	cfg.Token = ""
-	return cfg
-}
-
 // hasToken returns true if the config has a non-blank token.
 func (cfg Config) hasToken() bool {
 	return strings.TrimSpace(cfg.Token) != ""
-}
-
-// withPreservedSecret returns next with the current token copied in if next.Token is blank.
-func (cfg Config) withPreservedSecret(next Config) Config {
-	if strings.TrimSpace(next.Token) == "" {
-		next.Token = cfg.Token
-	}
-	return next
 }
 
 // runtimeConfig applies OTGEN_ENDPOINT and OTGEN_TOKEN env overrides,
@@ -318,9 +304,4 @@ func endpointFor(base string, kind signalKind) string {
 // endpointFromEnv reports whether OTGEN_ENDPOINT is set in the environment.
 func endpointFromEnv() bool {
 	return strings.TrimSpace(os.Getenv(envEndpoint)) != ""
-}
-
-// envTokenConfigured reports whether OTGEN_TOKEN is set in the environment.
-func envTokenConfigured() bool {
-	return strings.TrimSpace(os.Getenv(envToken)) != ""
 }

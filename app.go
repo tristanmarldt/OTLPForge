@@ -3,12 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -34,97 +31,6 @@ func NewApp(configPath string, httpTimeout time.Duration) *App {
 	}
 }
 
-func (a *App) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", a.handleIndex)
-	mux.HandleFunc("/api/config", a.handleConfig)
-	mux.HandleFunc("/api/start", a.handleStart)
-	mux.HandleFunc("/api/stop", a.handleStop)
-	mux.HandleFunc("/api/status", a.handleStatus)
-	return mux
-}
-
-func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprint(w, "otgen\n\nGET  /api/config   read config\nPOST /api/config   write config\nPOST /api/start    start sending\nPOST /api/stop     stop sending\nGET  /api/status   runtime status\n")
-}
-
-func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		a.mu.RLock()
-		effectiveCfg := a.cfg.runtimeConfig()
-		resp := map[string]any{
-			"config":          a.cfg.redacted(),
-			"effectiveConfig": effectiveCfg.redacted(),
-			"status":          a.status,
-			"tokenConfigured": effectiveCfg.hasToken(),
-			"endpointFromEnv": endpointFromEnv(),
-			"tokenFromEnv":    envTokenConfigured(),
-		}
-		a.mu.RUnlock()
-		writeJSON(w, http.StatusOK, resp)
-	case http.MethodPost:
-		defer r.Body.Close()
-		var cfg Config
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&cfg); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-			return
-		}
-
-		cfg = normalizeConfig(cfg)
-		a.mu.RLock()
-		cfg = a.cfg.withPreservedSecret(cfg)
-		a.mu.RUnlock()
-		if err := validateConfig(cfg); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.SetConfig(cfg); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-	default:
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (a *App) handleStart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := a.Start(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-}
-
-func (a *App) handleStop(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	a.Stop()
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-}
-
-func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	a.mu.RLock()
-	status := a.status
-	a.mu.RUnlock()
-	writeJSON(w, http.StatusOK, status)
-}
-
 func (a *App) SetConfig(cfg Config) error {
 	a.mu.Lock()
 	a.cfg = cfg
@@ -137,7 +43,6 @@ func (a *App) SetConfig(cfg Config) error {
 	if !running {
 		return nil
 	}
-
 	a.Stop()
 	return a.Start()
 }
@@ -239,8 +144,7 @@ func (a *App) postOTLP(endpoint, token string, kind signalKind, payload []byte) 
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
-// formatToken ensures the token is prefixed with "Api-Token " when it is not
-// already so prefixed.
+// formatToken ensures the token is prefixed with "Api-Token " when it is not already.
 func formatToken(token string) string {
 	if !strings.HasPrefix(strings.ToLower(token), "api-token ") {
 		return "Api-Token " + token
@@ -285,18 +189,4 @@ func (a *App) GetStatus() RuntimeStatus {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.status
-}
-
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func withRequestLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, path.Clean(r.URL.Path), time.Since(start).String())
-	})
 }

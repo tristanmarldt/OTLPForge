@@ -83,9 +83,8 @@ version="1.0"                # string (quoted to prevent numeric detection)
 |----------|-------------|
 | `OTGEN_ENDPOINT` | OTLP base URL, overrides saved config |
 | `OTGEN_TOKEN` | API token, overrides saved config |
-| `PORT` | HTTP API port (default `8080`) |
 
-Config is saved to `config.json` in the working directory. The token is always redacted from API responses.
+Config is saved to `config.json` in the working directory.
 
 ### Endpoint format
 
@@ -97,14 +96,3 @@ otgen appends `/v1/traces`, `/v1/metrics`, `/v1/logs` automatically unless the U
 - Token scopes required: `openTelemetryTrace.ingest`, `metrics.ingest`, `logs.ingest`
 - Tokens are auto-prefixed with `Api-Token ` for the `Authorization` header
 
-## HTTP API
-
-Runs alongside the TUI on port 8080. Useful for scripting.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/config` | Read config (token redacted) |
-| `POST` | `/api/config` | Write config |
-| `POST` | `/api/start` | Start the sender |
-| `POST` | `/api/stop` | Stop the sender |
-| `GET` | `/api/status` | Running state and per-service counters |

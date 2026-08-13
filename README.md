@@ -81,8 +81,8 @@ version="1.0"                # string (quoted to prevent numeric detection)
 
 | Variable | Description |
 |----------|-------------|
-| `OTLPFORGE_ENDPOINT` | OTLP base URL, overrides saved config |
-| `OTLPFORGE_TOKEN` | API token, overrides saved config |
+| `OTGEN_ENDPOINT` | OTLP base URL, overrides saved config |
+| `OTGEN_TOKEN` | API token, overrides saved config |
 | `PORT` | HTTP API port (default `8080`) |
 
 Config is saved to `config.json` in the working directory. The token is always redacted from API responses.

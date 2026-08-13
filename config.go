@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	envEndpoint = "OTLPFORGE_ENDPOINT"
-	envToken    = "OTLPFORGE_TOKEN"
+	envEndpoint = "OTGEN_ENDPOINT"
+	envToken    = "OTGEN_TOKEN"
 )
 
 // AttrValue is a typed OTLP attribute value.  The four scalar types from the
@@ -177,7 +177,7 @@ func (cfg Config) withPreservedSecret(next Config) Config {
 	return next
 }
 
-// runtimeConfig applies OTLPFORGE_ENDPOINT and OTLPFORGE_TOKEN env overrides,
+// runtimeConfig applies OTGEN_ENDPOINT and OTGEN_TOKEN env overrides,
 // then normalizes the result.
 func (cfg Config) runtimeConfig() Config {
 	if endpoint := strings.TrimSpace(os.Getenv(envEndpoint)); endpoint != "" {
@@ -315,12 +315,12 @@ func endpointFor(base string, kind signalKind) string {
 	}
 }
 
-// endpointFromEnv reports whether OTLPFORGE_ENDPOINT is set in the environment.
+// endpointFromEnv reports whether OTGEN_ENDPOINT is set in the environment.
 func endpointFromEnv() bool {
 	return strings.TrimSpace(os.Getenv(envEndpoint)) != ""
 }
 
-// envTokenConfigured reports whether OTLPFORGE_TOKEN is set in the environment.
+// envTokenConfigured reports whether OTGEN_TOKEN is set in the environment.
 func envTokenConfigured() bool {
 	return strings.TrimSpace(os.Getenv(envToken)) != ""
 }

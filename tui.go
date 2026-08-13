@@ -92,6 +92,8 @@ type tui struct {
 	fInterval      string
 	fChildSpans    string
 	fSignals       []string
+	fMeshSemantics bool
+	fMeshMetrics   bool
 	fEnabled       bool
 	fAttrs         string
 	fSpanAttrs     string
@@ -329,6 +331,8 @@ func (m *tui) loadServiceFields(idx int) {
 		m.fInterval = "5"
 		m.fChildSpans = "0"
 		m.fSignals = []string{"logs", "metrics", "spans"}
+		m.fMeshSemantics = false
+		m.fMeshMetrics = false
 		m.fEnabled = true
 		m.fAttrs = ""
 		m.fSpanAttrs = ""
@@ -347,6 +351,8 @@ func (m *tui) loadServiceFields(idx int) {
 			m.fSignals = append([]string(nil), svc.Signals...)
 			sort.Strings(m.fSignals)
 		}
+		m.fMeshSemantics = svc.MeshSemantics
+		m.fMeshMetrics = svc.MeshMetrics
 		m.fEnabled = svc.Enabled
 
 		m.fAttrs = attrsToText(svc.Attributes)
@@ -376,6 +382,8 @@ func (m *tui) buildServiceFromFields() Service {
 		Interval:      interval,
 		ChildSpans:    childSpans,
 		Signals:       signals,
+		MeshSemantics: m.fMeshSemantics,
+		MeshMetrics:   m.fMeshMetrics,
 		Enabled:       m.fEnabled,
 		Attributes:    parseAttrs(m.fAttrs),
 		SpanAttrs:     parseAttrs(m.fSpanAttrs),
@@ -452,6 +460,18 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 					).
 					Description("←/→ change").
 					Value(&m.fSpanKind),
+				huh.NewConfirm().
+					Title(settingsLabel("Istio semantics")).
+					Inline(true).
+					Affirmative("on").
+					Negative("off").
+					Value(&m.fMeshSemantics),
+				huh.NewConfirm().
+					Title(settingsLabel("Istio metrics")).
+					Inline(true).
+					Affirmative("on").
+					Negative("off").
+					Value(&m.fMeshMetrics),
 			),
 		).WithWidth(w)
 
@@ -927,6 +947,9 @@ func (m *tui) serviceTabSummaries() []string {
 	}
 	settings := fmt.Sprintf("%s · every %ss · %s%% err",
 		m.fSpanKind, strings.TrimSpace(m.fInterval), strings.TrimSpace(m.fFailure))
+	if m.fMeshSemantics || m.fMeshMetrics {
+		settings += " · istio mesh"
+	}
 	if n, _ := strconv.Atoi(strings.TrimSpace(m.fChildSpans)); n > 0 {
 		settings += fmt.Sprintf(" · +%d child", n)
 	}

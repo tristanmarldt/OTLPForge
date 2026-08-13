@@ -17,6 +17,16 @@ func TestRuntimeConfigUsesEnvEndpointAndToken(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigStartsWithoutCustomAttributes(t *testing.T) {
+	cfg := defaultConfig()
+	if len(cfg.Attributes) != 0 {
+		t.Fatalf("default global attributes = %v, want none", cfg.Attributes)
+	}
+	if got := cfg.Services[0].Attributes; len(got) != 0 {
+		t.Fatalf("default service attributes = %v, want none", got)
+	}
+}
+
 func TestRuntimeConfigEnvOverridesSavedValues(t *testing.T) {
 	t.Setenv(envEndpoint, "https://env.example/api/v2/otlp")
 	t.Setenv(envToken, "env-token")

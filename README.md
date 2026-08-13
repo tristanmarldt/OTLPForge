@@ -6,7 +6,7 @@ Run it, point it at an endpoint, watch spans · metrics · logs flow. Useful for
 
 ```
   otgen v0.2.2  ● running
-  https://xxx.live.dynatrace.com/api/v2/otlp  ·  2 global attr
+  https://xxx.live.dynatrace.com/api/v2/otlp
   ────────────────────────────────────────────────────────────────────────
 
 ▶ ● checkout-svc  server  [http-server]  [k8s]  5s  5% err  +3 child
@@ -23,8 +23,9 @@ Run it, point it at an endpoint, watch spans · metrics · logs flow. Useful for
 
 ## Features
 
-- **Service-centric model** — each service emits independently with its own interval, span kind, failure rate, child spans, signal selection, and attributes
+- **Service-centric model** — each service emits independently with its own interval, span kind, failure rate, child spans, signal selection, mesh options, and attributes
 - **Semantic-convention templates** — HTTP, database, messaging and gRPC spans carry the right OTel attributes so Dynatrace detects the technology
+- **Istio mesh telemetry** — optionally add Istio workload semantics to spans/resources and standard mesh metrics to the Metrics signal
 - **Infrastructure templates** — Kubernetes (incl. EKS / GKE / AKS / OpenShift), ECS, Docker, Lambda, Cloud Foundry and more, matching what the Dynatrace collector's `k8sattributesprocessor` and Operator inject
 - **Four OTel attribute types** — `string`, `bool`, `int64`, `double` — sent as native OTLP `AnyValue` types on the wire
 - **Keyboard-driven TUI** — live status counters, no browser required
@@ -74,7 +75,7 @@ The editor is split into six tabs, reachable from the tab list or directly with 
 
 | Tab | Contents |
 |-----|----------|
-| `1` Settings | Name, interval, failure rate, child spans, span kind |
+| `1` Settings | Name, interval, failure rate, child spans, span kind, Istio semantics/metrics |
 | `2` Signals | Spans, metrics, logs |
 | `3` Span template | HTTP server / client, database, messaging, gRPC |
 | `4` Infra template | Kubernetes (incl. EKS / GKE / AKS / OpenShift), containers, serverless, host |
@@ -97,6 +98,15 @@ sends nothing at all and `Ctrl+3` arrives as `Esc`.
 
 Attributes marked `~` are inherited from the selected template. Attribute
 editors contain only explicit overrides, marked `✎`.
+
+New configurations start with no custom resource attributes. Add values such as
+`env`, `dt.cost.costcenter`, or `dt.security_context` in Global configuration
+when they should apply to every service, or in Resource attrs for one service.
+
+Istio semantics add workload, namespace, principal, canonical-service, and
+cluster attributes based on the current service. Istio metrics add
+`istio_requests_total`, request duration, request size, and response size to
+the existing Metrics signal.
 
 ## Attributes
 

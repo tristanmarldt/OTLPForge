@@ -4,10 +4,21 @@ import (
 	"strings"
 	"testing"
 
+	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+func stringAttrValue(attrs []*commonpb.KeyValue, key string) string {
+	for _, attr := range attrs {
+		if attr.GetKey() == key {
+			return attr.GetValue().GetStringValue()
+		}
+	}
+	return ""
+}
 
 func TestBuildPayloadCreatesSpanForService(t *testing.T) {
 	cfg := Config{Endpoint: "https://example.com"}
@@ -160,5 +171,62 @@ func TestTemplateSpanAttributes(t *testing.T) {
 				t.Errorf("expected span attribute %q for template %q", tc.wantAttrKey, tc.template)
 			}
 		})
+	}
+}
+
+func TestIstioSemanticsAddWorkloadContext(t *testing.T) {
+	payload, err := buildPayload(Config{}, Service{Name: "checkout", MeshSemantics: true, Signals: []string{"spans"}}, signalSpans)
+	if err != nil {
+		t.Fatalf("buildPayload: %v", err)
+	}
+	var req collectortracepb.ExportTraceServiceRequest
+	if err := proto.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	resource := req.GetResourceSpans()[0].GetResource().GetAttributes()
+	if got := stringAttrValue(resource, "service.istio.io/canonical-name"); got != "checkout" {
+		t.Fatalf("canonical resource name = %q, want checkout", got)
+	}
+	span := req.GetResourceSpans()[0].GetScopeSpans()[0].GetSpans()[0]
+	if got := stringAttrValue(span.GetAttributes(), "destination.workload.name"); got != "checkout" {
+		t.Fatalf("destination workload = %q, want checkout", got)
+	}
+	if got := stringAttrValue(span.GetAttributes(), "connection.security_policy"); got != "mutual_tls" {
+		t.Fatalf("security policy = %q, want mutual_tls", got)
+	}
+}
+
+func TestIstioMetricsAddStandardMeshMetrics(t *testing.T) {
+	payload, err := buildPayload(Config{}, Service{Name: "checkout", MeshMetrics: true, Signals: []string{"metrics"}}, signalMetrics)
+	if err != nil {
+		t.Fatalf("buildPayload: %v", err)
+	}
+	var req collectormetricspb.ExportMetricsServiceRequest
+	if err := proto.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	metrics := req.GetResourceMetrics()[0].GetScopeMetrics()[0].GetMetrics()
+	want := map[string]bool{
+		"checkout.requests.total":             false,
+		"istio_requests_total":                false,
+		"istio_request_duration_milliseconds": false,
+		"istio_request_bytes":                 false,
+		"istio_response_bytes":                false,
+	}
+	for _, metric := range metrics {
+		if _, ok := want[metric.GetName()]; ok {
+			want[metric.GetName()] = true
+		}
+		if metric.GetName() == "istio_requests_total" {
+			points := metric.GetSum().GetDataPoints()
+			if got := stringAttrValue(points[0].GetAttributes(), "destination_service"); got != "checkout.default.svc.cluster.local" {
+				t.Errorf("destination service = %q", got)
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("missing metric %q", name)
+		}
 	}
 }

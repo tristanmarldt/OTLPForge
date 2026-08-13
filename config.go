@@ -99,6 +99,8 @@ type Service struct {
 	Signals       []string             `json:"signals"`                 // "spans","metrics","logs"; empty = all three
 	Attributes    map[string]AttrValue `json:"attributes"`              // resource-level; service.name always wins
 	SpanAttrs     map[string]AttrValue `json:"spanAttrs,omitempty"`     // span-level overrides for template-generated attributes
+	MeshSemantics bool                 `json:"meshSemantics,omitempty"` // add Istio workload attributes to resources and spans
+	MeshMetrics   bool                 `json:"meshMetrics,omitempty"`   // add Istio standard metrics to the Metrics signal
 	Enabled       bool                 `json:"enabled"`
 }
 
@@ -177,12 +179,7 @@ func defaultConfig() Config {
 			Interval:    5,
 			ChildSpans:  0,
 			Signals:     []string{"spans", "metrics", "logs"},
-			Attributes: map[string]AttrValue{
-				"env":                 strAttrVal("dev"),
-				"dt.cost.costcenter":  strAttrVal("test-cost-center"),
-				"dt.security_context": strAttrVal("test-sec-ctxt"),
-			},
-			Enabled: true,
+			Enabled:     true,
 		}},
 	}
 }

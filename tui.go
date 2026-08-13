@@ -48,6 +48,7 @@ const (
 	screenAttrsEdit
 	screenSpanAttrsEdit
 	screenGlobal
+	screenGlobalAttrs
 	screenConfirmDelete
 )
 
@@ -171,6 +172,8 @@ func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 		return m.commitSpanAttrs()
 	case screenGlobal:
 		return m.commitGlobal()
+	case screenGlobalAttrs:
+		return m.commitGlobalAttrs()
 	case screenConfirmDelete:
 		return m.commitDelete()
 	}
@@ -233,6 +236,9 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "g":
 		return m.openGlobalForm()
+
+	case "G":
+		return m.openGlobalAttrsForm()
 	}
 	return m, nil
 }
@@ -548,7 +554,6 @@ func (m *tui) commitSpanAttrs() (tea.Model, tea.Cmd) {
 func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 	m.gEndpoint = m.cfg.Endpoint
 	m.gToken = ""
-	m.gAttrs = attrsToText(m.cfg.Attributes)
 
 	tokenDesc := "Leave blank to keep current token"
 	if !m.cfg.hasToken() {
@@ -567,13 +572,6 @@ func (m *tui) openGlobalForm() (tea.Model, tea.Cmd) {
 				Password(true).
 				Value(&m.gToken),
 		),
-		huh.NewGroup(
-			huh.NewText().
-				Title("Global resource attributes").
-				Description("Merged into every service at lowest precedence · key=value per line · esc: cancel").
-				Lines(10).
-				Value(&m.gAttrs),
-		),
 	).WithWidth(m.formWidth())
 
 	m.screen = screenGlobal
@@ -589,13 +587,47 @@ func (m *tui) commitGlobal() (tea.Model, tea.Cmd) {
 	if tok := strings.TrimSpace(m.gToken); tok != "" {
 		cfg.Token = tok
 	}
-	cfg.Attributes = parseAttrs(m.gAttrs)
 
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
 	} else {
 		m.cfg = cfg
 		m.setFlash("settings saved", false)
+	}
+	return m, nil
+}
+
+// ── global resource attributes form ──────────────────────────────────────────
+
+func (m *tui) openGlobalAttrsForm() (tea.Model, tea.Cmd) {
+	m.gAttrs = attrsToText(m.cfg.Attributes)
+
+	m.form = huh.NewForm(
+		huh.NewGroup(
+			huh.NewText().
+				Title("Global resource attributes").
+				Description("Merged into every service at lowest precedence · key=value per line · esc: cancel").
+				Lines(14).
+				Value(&m.gAttrs),
+		),
+	).WithWidth(m.formWidth())
+
+	m.screen = screenGlobalAttrs
+	return m, m.form.Init()
+}
+
+func (m *tui) commitGlobalAttrs() (tea.Model, tea.Cmd) {
+	m.screen = screenList
+	m.form = nil
+
+	cfg := m.cfg
+	cfg.Attributes = parseAttrs(m.gAttrs)
+
+	if err := m.app.SetConfig(cfg); err != nil {
+		m.setFlash("error: "+err.Error(), true)
+	} else {
+		m.cfg = cfg
+		m.setFlash("global attributes saved", false)
 	}
 	return m, nil
 }
@@ -843,7 +875,7 @@ func (m *tui) renderService(i int, svc Service) string {
 }
 
 func (m *tui) renderHelp() string {
-	keys := []string{"n new", "↵ edit", "a res-attrs", "s span-attrs", "d delete", "␣ toggle", "r run/stop", "g settings", "q quit"}
+	keys := []string{"n new", "↵ edit", "a res-attrs", "s span-attrs", "d delete", "␣ toggle", "r run/stop", "g settings", "G global-attrs", "q quit"}
 	return sHelp.Render("  " + strings.Join(keys, "  ·  "))
 }
 

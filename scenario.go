@@ -14,6 +14,7 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -226,7 +227,7 @@ func (t *generatedTrace) addSpan(svc Service, span *tracepb.Span) {
 	t.Groups[svc.Name] = append(t.Groups[svc.Name], span)
 }
 
-func marshalTrace(trace *generatedTrace) ([]byte, error) {
+func traceExportRequest(trace *generatedTrace) *collectortracepb.ExportTraceServiceRequest {
 	request := &collectortracepb.ExportTraceServiceRequest{}
 	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
 	for _, name := range trace.Order {
@@ -235,10 +236,14 @@ func marshalTrace(trace *generatedTrace) ([]byte, error) {
 			ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: trace.Groups[name]}},
 		})
 	}
-	return proto.Marshal(request)
+	return request
 }
 
-func marshalMetrics(cfg Config, svc Service, now time.Time) ([]byte, error) {
+func marshalTrace(trace *generatedTrace) ([]byte, error) {
+	return proto.Marshal(traceExportRequest(trace))
+}
+
+func metricsExportRequest(cfg Config, svc Service, now time.Time) (*collectormetricspb.ExportMetricsServiceRequest, error) {
 	effective := effectiveMetricConfig(svc)
 	failed := mathrand.IntN(100) < svc.FailureRate
 	metric := &metricspb.Metric{Name: effective.Name, Unit: effective.Unit}
@@ -286,55 +291,85 @@ func marshalMetrics(cfg Config, svc Service, now time.Time) ([]byte, error) {
 	if svc.Mesh {
 		metrics = append(metrics, istioMetrics(svc, now, failed)...)
 	}
-	return proto.Marshal(&collectormetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
+	return &collectormetricspb.ExportMetricsServiceRequest{ResourceMetrics: []*metricspb.ResourceMetrics{{
 		Resource: &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)},
 		ScopeMetrics: []*metricspb.ScopeMetrics{{
 			Scope:   &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"},
 			Metrics: metrics,
 		}},
-	}}})
+	}}}, nil
 }
 
-func marshalCorrelatedLogs(cfg Config, trace *generatedTrace, observed time.Time) ([]byte, error) {
-	groups := make(map[string][]*logspb.LogRecord)
-	order := make([]string, 0, len(trace.Order))
-	for _, generated := range trace.ServiceSpans {
-		if !generated.Service.hasSignal(signalLogs) {
-			continue
+func marshalMetrics(cfg Config, svc Service, now time.Time) ([]byte, error) {
+	req, err := metricsExportRequest(cfg, svc, now)
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(req)
+}
+
+func logsExportRequest(cfg Config, trace *generatedTrace, svc Service, now time.Time) (*collectorlogspb.ExportLogsServiceRequest, error) {
+	if trace != nil {
+		groups := make(map[string][]*logspb.LogRecord)
+		order := make([]string, 0, len(trace.Order))
+		for _, generated := range trace.ServiceSpans {
+			if !generated.Service.hasSignal(signalLogs) {
+				continue
+			}
+			name := generated.Service.Name
+			if _, ok := groups[name]; !ok {
+				order = append(order, name)
+			}
+			severity, text := logSeverity(generated.Service, generated.Failed)
+			body := generated.Span.Name + " completed"
+			event := "otgen.service.completed"
+			outcome := "success"
+			if generated.Failed {
+				body = generated.Span.Name + " failed: simulated failure"
+				event = "otgen.service.failed"
+				outcome = "failure"
+			}
+			groups[name] = append(groups[name], &logspb.LogRecord{
+				TimeUnixNano:         generated.Span.EndTimeUnixNano,
+				ObservedTimeUnixNano: uint64(now.UnixNano()),
+				TraceId:              append([]byte(nil), generated.Span.TraceId...),
+				SpanId:               append([]byte(nil), generated.Span.SpanId...),
+				SeverityNumber:       severity,
+				SeverityText:         text,
+				Body:                 &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: body}},
+				Attributes:           []*commonpb.KeyValue{stringAttr("otgen.outcome", outcome), stringAttr("event.name", event)},
+			})
 		}
-		name := generated.Service.Name
-		if _, ok := groups[name]; !ok {
-			order = append(order, name)
+		request := &collectorlogspb.ExportLogsServiceRequest{}
+		scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
+		for _, name := range order {
+			request.ResourceLogs = append(request.ResourceLogs, &logspb.ResourceLogs{
+				Resource:  &resourcepb.Resource{Attributes: resourceForTraceService(cfg, trace, name)},
+				ScopeLogs: []*logspb.ScopeLogs{{Scope: scope, LogRecords: groups[name]}},
+			})
 		}
-		severity, text := logSeverity(generated.Service, generated.Failed)
-		body := generated.Span.Name + " completed"
-		event := "otgen.service.completed"
-		outcome := "success"
-		if generated.Failed {
-			body = generated.Span.Name + " failed: simulated failure"
-			event = "otgen.service.failed"
-			outcome = "failure"
-		}
-		groups[name] = append(groups[name], &logspb.LogRecord{
-			TimeUnixNano:         generated.Span.EndTimeUnixNano,
-			ObservedTimeUnixNano: uint64(observed.UnixNano()),
-			TraceId:              append([]byte(nil), generated.Span.TraceId...),
-			SpanId:               append([]byte(nil), generated.Span.SpanId...),
+		return request, nil
+	}
+	// standalone path
+	severity, text := logSeverity(svc, false)
+	return &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource: &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)},
+		ScopeLogs: []*logspb.ScopeLogs{{Scope: &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}, LogRecords: []*logspb.LogRecord{{
+			TimeUnixNano:         uint64(now.UnixNano()),
+			ObservedTimeUnixNano: uint64(now.UnixNano()),
 			SeverityNumber:       severity,
 			SeverityText:         text,
-			Body:                 &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: body}},
-			Attributes:           []*commonpb.KeyValue{stringAttr("otgen.outcome", outcome), stringAttr("event.name", event)},
-		})
+			Body:                 &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc.Name + " synthetic log"}},
+		}}}},
+	}}}, nil
+}
+
+func marshalCorrelatedLogs(cfg Config, trace *generatedTrace, now time.Time) ([]byte, error) {
+	req, err := logsExportRequest(cfg, trace, Service{}, now)
+	if err != nil {
+		return nil, err
 	}
-	request := &collectorlogspb.ExportLogsServiceRequest{}
-	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
-	for _, name := range order {
-		request.ResourceLogs = append(request.ResourceLogs, &logspb.ResourceLogs{
-			Resource:  &resourcepb.Resource{Attributes: resourceForTraceService(cfg, trace, name)},
-			ScopeLogs: []*logspb.ScopeLogs{{Scope: scope, LogRecords: groups[name]}},
-		})
-	}
-	return proto.Marshal(request)
+	return proto.Marshal(req)
 }
 
 func resourceForTraceService(cfg Config, trace *generatedTrace, name string) []*commonpb.KeyValue {
@@ -348,17 +383,72 @@ func resourceForTraceService(cfg Config, trace *generatedTrace, name string) []*
 }
 
 func marshalStandaloneLog(cfg Config, svc Service, now time.Time) ([]byte, error) {
-	severity, text := logSeverity(svc, false)
-	return proto.Marshal(&collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
-		Resource: &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)},
-		ScopeLogs: []*logspb.ScopeLogs{{Scope: &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}, LogRecords: []*logspb.LogRecord{{
-			TimeUnixNano:         uint64(now.UnixNano()),
-			ObservedTimeUnixNano: uint64(now.UnixNano()),
-			SeverityNumber:       severity,
-			SeverityText:         text,
-			Body:                 &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc.Name + " synthetic log"}},
-		}}}},
-	}}})
+	req, err := logsExportRequest(cfg, nil, svc, now)
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(req)
+}
+
+// buildOTLPJSON builds a sample OTLP payload for root and returns each signal
+// as pretty-printed protojson. cfg must contain root in its Services list.
+func buildOTLPJSON(cfg Config, root Service) (traces, metrics, logs string, err error) {
+	cfg = normalizeConfig(cfg)
+	if err = validateConfig(cfg); err != nil {
+		return
+	}
+	configuredRoot, ok := indexServices(cfg)[root.Name]
+	if !ok {
+		err = fmt.Errorf("service %q is not configured", root.Name)
+		return
+	}
+	root = configuredRoot
+	now := time.Now()
+
+	opts := protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: false}
+
+	var trace *generatedTrace
+	if root.hasSignal(signalSpans) {
+		trace, err = buildTrace(cfg, root, now)
+		if err != nil {
+			return
+		}
+		var b []byte
+		b, err = opts.Marshal(traceExportRequest(trace))
+		if err != nil {
+			return
+		}
+		traces = string(b)
+	}
+
+	if root.hasSignal(signalMetrics) {
+		var req *collectormetricspb.ExportMetricsServiceRequest
+		req, err = metricsExportRequest(cfg, root, now)
+		if err != nil {
+			return
+		}
+		var b []byte
+		b, err = opts.Marshal(req)
+		if err != nil {
+			return
+		}
+		metrics = string(b)
+	}
+
+	if root.hasSignal(signalLogs) {
+		var req *collectorlogspb.ExportLogsServiceRequest
+		req, err = logsExportRequest(cfg, trace, root, now)
+		if err != nil {
+			return
+		}
+		var b []byte
+		b, err = opts.Marshal(req)
+		if err != nil {
+			return
+		}
+		logs = string(b)
+	}
+	return
 }
 
 func logSeverity(svc Service, failed bool) (logspb.SeverityNumber, string) {

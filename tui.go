@@ -112,10 +112,12 @@ type tui struct {
 	flashEnd time.Time
 
 	// payload preview (screenPayload)
-	payloadText      string
-	payloadScroll    int
-	payloadPrevScreen    tuiScreen // screen to restore when preview closes
-	payloadPrevTabActive bool      // tabActive to restore when preview closes
+	payloadSummary      string
+	payloadJSON         string
+	payloadMode         int // 0 = config summary, 1 = OTLP JSON
+	payloadScroll       int
+	payloadPrevScreen   tuiScreen
+	payloadPrevTabActive bool
 }
 
 func NewTUIModel(app *App) *tui {
@@ -1719,14 +1721,34 @@ func parseAttrValue(v string) AttrValue {
 // returns exactly where the user came from.
 func (m *tui) openPayloadPreview() (tea.Model, tea.Cmd) {
 	var svc Service
+	cfg := m.cfg
 	if m.screen == screenServiceEdit {
 		svc = m.buildServiceFromFields()
+		// Include the unsaved service in a scratch config so buildOTLPJSON
+		// can find it by name via indexServices().
+		svcs := append([]Service(nil), cfg.Services...)
+		if m.editIdx == -1 {
+			svcs = append(svcs, svc)
+		} else if m.editIdx < len(svcs) {
+			svcs[m.editIdx] = svc
+		}
+		cfg.Services = svcs
 	} else if len(m.cfg.Services) > 0 && m.cursor < len(m.cfg.Services) {
 		svc = m.cfg.Services[m.cursor]
 	} else {
 		return m, nil
 	}
-	m.payloadText = m.buildPayloadPreview(svc)
+
+	m.payloadSummary = m.buildPayloadPreview(svc)
+
+	traces, metrics, logs, err := buildOTLPJSON(cfg, svc)
+	if err != nil {
+		m.payloadJSON = sError.Render("  error: " + err.Error())
+	} else {
+		m.payloadJSON = m.formatOTLPJSON(traces, metrics, logs)
+	}
+
+	m.payloadMode = 0
 	m.payloadScroll = 0
 	m.payloadPrevScreen = m.screen
 	m.payloadPrevTabActive = m.tabActive
@@ -1735,9 +1757,10 @@ func (m *tui) openPayloadPreview() (tea.Model, tea.Cmd) {
 }
 
 // updatePayload handles keys while screenPayload is active.
-// Arrow keys scroll; any other key closes.
+// Arrow keys scroll; tab switches view mode; any other key closes.
 func (m *tui) updatePayload(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	all := strings.Split(m.payloadText, "\n")
+	text := m.activePayload()
+	all := strings.Split(text, "\n")
 	pageSize := m.height - 4
 	if pageSize < 5 {
 		pageSize = 5
@@ -1765,6 +1788,15 @@ func (m *tui) updatePayload(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.payloadScroll > maxScroll {
 			m.payloadScroll = maxScroll
 		}
+	case "tab":
+		m.payloadMode = 1 - m.payloadMode
+		m.payloadScroll = 0
+	case "1":
+		m.payloadMode = 0
+		m.payloadScroll = 0
+	case "2":
+		m.payloadMode = 1
+		m.payloadScroll = 0
 	default:
 		m.screen = m.payloadPrevScreen
 		m.tabActive = m.payloadPrevTabActive
@@ -1772,10 +1804,40 @@ func (m *tui) updatePayload(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// activePayload returns the text for the currently selected payload mode.
+func (m *tui) activePayload() string {
+	if m.payloadMode == 1 {
+		return m.payloadJSON
+	}
+	return m.payloadSummary
+}
+
+// payloadTabBar renders the two-tab bar at the top of the payload preview.
+// Tab 1 = Config summary, Tab 2 = OTLP JSON. Active tab gets the blue pill.
+func (m *tui) payloadTabBar() string {
+	tabs := []string{"Config summary", "OTLP JSON"}
+	parts := make([]string, len(tabs))
+	for i, name := range tabs {
+		label := fmt.Sprintf("%d %s", i+1, name)
+		if i == m.payloadMode {
+			parts[i] = sTabActive.Render(label)
+		} else {
+			parts[i] = sTabInactive.Render(label)
+		}
+	}
+	sep := sMuted.Render(" │ ")
+	return "  " + strings.Join(parts, sep) + "\n  " + m.sepLine()
+}
+
 // payloadView renders the payload preview, paginated to the terminal height.
+// The tab bar (2 lines) sits above the scrollable area; the footer sits below.
 func (m *tui) payloadView() string {
-	all := strings.Split(m.payloadText, "\n")
-	pageSize := m.height - 4
+	tabBar := m.payloadTabBar()
+
+	text := m.activePayload()
+	all := strings.Split(text, "\n")
+	// 2 tab-bar lines + 1 blank + 1 blank before footer + 1 footer = 5 overhead
+	pageSize := m.height - 5
 	if pageSize < 5 {
 		pageSize = 5
 	}
@@ -1788,8 +1850,32 @@ func (m *tui) payloadView() string {
 		end = len(all)
 	}
 	visible := strings.Join(all[start:end], "\n")
-	footer := sHelp.Render(fmt.Sprintf("  ↑↓/jk scroll  ·  pgup/pgdn page  ·  %d/%d lines  ·  any other key closes", start+1, len(all)))
-	return visible + "\n\n" + footer
+
+	footer := sHelp.Render(fmt.Sprintf(
+		"  tab/1/2 switch  ·  ↑↓/jk scroll  ·  pgup/pgdn page  ·  %d/%d  ·  any other key closes",
+		start+1, len(all),
+	))
+	return tabBar + "\n" + visible + "\n\n" + footer
+}
+
+// formatOTLPJSON combines the three protojson sections into one scrollable string.
+// No header or footer — payloadView() renders those around the scrolled content.
+func (m *tui) formatOTLPJSON(traces, metrics, logs string) string {
+	var b strings.Builder
+	section := func(label, body string) {
+		if body == "" {
+			return
+		}
+		b.WriteString(sBold.Render("  "+label) + "\n\n")
+		for _, line := range strings.Split(body, "\n") {
+			b.WriteString("  " + line + "\n")
+		}
+		b.WriteString("\n")
+	}
+	section("Traces", traces)
+	section("Metrics", metrics)
+	section("Logs", logs)
+	return b.String()
 }
 
 // buildPayloadPreview returns a formatted multi-line string showing the
@@ -1803,10 +1889,6 @@ func (m *tui) buildPayloadPreview(svc Service) string {
 	addRow := func(label, value string) {
 		b.WriteString(fmt.Sprintf("  %-22s %s\n", label, value))
 	}
-
-	// ── header ────────────────────────────────────────────────────────────
-	b.WriteString("  " + sPrimaryBold.Render("otgen") + sMuted.Render("  payload preview") + "\n")
-	b.WriteString("  " + m.sepLine() + "\n\n")
 
 	// ── service settings ──────────────────────────────────────────────────
 	b.WriteString(sBold.Render("  Service: ") + colorForService(svc.Name).Render(svc.Name) + "\n\n")
@@ -1892,7 +1974,6 @@ func (m *tui) buildPayloadPreview(svc Service) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(sHelp.Render("  ↑↓/jk scroll  ·  pgup/pgdn page  ·  any other key closes"))
 	return b.String()
 }
 

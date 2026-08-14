@@ -13,25 +13,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ── styles ────────────────────────────────────────────────────────────────────
-
-var (
-	colPrimary = lipgloss.Color("#00aaff")
-	colSuccess = lipgloss.Color("#00c875")
-	colError   = lipgloss.Color("#ff5c5c")
-	colWarn    = lipgloss.Color("#e6a700")
-	colMuted   = lipgloss.Color("#555555")
-
-	sPrimary     = lipgloss.NewStyle().Foreground(colPrimary)
-	sPrimaryBold = lipgloss.NewStyle().Foreground(colPrimary).Bold(true)
-	sSuccess     = lipgloss.NewStyle().Foreground(colSuccess)
-	sError       = lipgloss.NewStyle().Foreground(colError)
-	sWarn        = lipgloss.NewStyle().Foreground(colWarn)
-	sMuted       = lipgloss.NewStyle().Foreground(colMuted)
-	sBold        = lipgloss.NewStyle().Bold(true)
-	sHelp        = lipgloss.NewStyle().Foreground(colMuted)
-)
-
 // ── messages ──────────────────────────────────────────────────────────────────
 
 type tickMsg struct{}
@@ -57,6 +38,7 @@ const (
 	screenConfirmDelete
 	screenConfirmDiscard
 	screenHelp
+	screenPayload
 )
 
 const (
@@ -120,11 +102,16 @@ type tui struct {
 	gToken    string
 	gAttrs    string
 
-	testing bool
+	testing    bool
+	spinnerIdx int // advances on each tick while testing == true
 
 	flash    string
 	flashErr bool
 	flashEnd time.Time
+
+	// payload preview (screenPayload)
+	payloadText   string
+	payloadScroll int
 }
 
 func NewTUIModel(app *App) *tui {
@@ -151,6 +138,9 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.cfg = m.app.GetConfig()
 		m.status = m.app.GetStatus()
+		if m.testing {
+			m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
+		}
 		if !m.flashEnd.IsZero() && time.Now().After(m.flashEnd) {
 			m.flash = ""
 			m.flashEnd = time.Time{}
@@ -171,6 +161,12 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenHelp:
 		if _, ok := msg.(tea.KeyMsg); ok {
 			m.screen = screenList
+		}
+		return m, nil
+
+	case screenPayload:
+		if k, ok := msg.(tea.KeyMsg); ok {
+			return m.updatePayload(k)
 		}
 		return m, nil
 
@@ -206,11 +202,6 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// editor's selector (field values survive); elsewhere to the list.
 		if k.Type == tea.KeyEsc {
 			return m.leaveForm()
-		}
-		if m.screen == screenServiceEdit && k.String() == "ctrl+r" {
-			m.editTab = (m.editTab + 1) % len(serviceTabNames)
-			m.form = m.makeServiceTabForm(m.editTab)
-			return m, m.form.Init()
 		}
 	}
 
@@ -314,8 +305,13 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.testing = true
-		m.setFlash("testing connection…", false)
+		m.spinnerIdx = 0
 		return m, testConnCmd(m.app)
+
+	case "ctrl+q":
+		if len(svcs) > 0 {
+			return m.openPayloadPreview()
+		}
 
 	case "g":
 		m.gEndpoint = m.cfg.Endpoint
@@ -635,26 +631,39 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 		).WithWidth(w)
 
 	case tabResourceAttrs:
-		return huh.NewForm(
-			huh.NewGroup(
-				huh.NewText().
-					Title("Resource attributes").
-					Description("Overrides only · " + attrTypeHint).
-					Lines(m.textLines()).
-					Value(&m.fAttrs),
-			),
-		).WithWidth(w)
+		svcForNote := Service{
+			Name:          strings.TrimSpace(m.fName),
+			InfraTemplate: m.fInfraTemplate,
+			Mesh:          m.fMesh,
+		}
+		resNote, resNoteLines := inheritedResAttrsNote(m.cfg, svcForNote, w-4)
+		var resFields []huh.Field
+		if resNote != "" {
+			resFields = append(resFields, huh.NewNote().
+				Title("Inherited (read-only)").
+				Description(resNote))
+		}
+		resFields = append(resFields, huh.NewText().
+			Title("Resource attribute overrides").
+			Description(attrTypeHint).
+			Lines(max(1, m.textLines()-max(0, resNoteLines+3))).
+			Value(&m.fAttrs))
+		return huh.NewForm(huh.NewGroup(resFields...)).WithWidth(w)
 
 	default: // tabSpanAttrs
-		return huh.NewForm(
-			huh.NewGroup(
-				huh.NewText().
-					Title("Span attribute overrides").
-					Description("Overrides only · " + attrTypeHint).
-					Lines(m.textLines()).
-					Value(&m.fSpanAttrs),
-			),
-		).WithWidth(w)
+		spanNote, spanNoteLines := inheritedSpanAttrsNote(m.fTemplate, w-4)
+		var spanFields []huh.Field
+		if spanNote != "" {
+			spanFields = append(spanFields, huh.NewNote().
+				Title("From template (read-only)").
+				Description(spanNote))
+		}
+		spanFields = append(spanFields, huh.NewText().
+			Title("Span attribute overrides").
+			Description(attrTypeHint).
+			Lines(max(1, m.textLines()-max(0, spanNoteLines+3))).
+			Value(&m.fSpanAttrs))
+		return huh.NewForm(huh.NewGroup(spanFields...)).WithWidth(w)
 	}
 }
 
@@ -726,15 +735,18 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "s":
 		return m.commitService()
 
-	case "up", "k", "left", "h":
+	case "up", "k", "left", "h", "[":
 		if m.editTab > 0 {
 			m.editTab--
 		}
 
-	case "down", "j", "right", "l":
+	case "down", "j", "right", "l", "]":
 		if m.editTab < len(serviceTabNames)-1 {
 			m.editTab++
 		}
+
+	case "ctrl+q":
+		return m.openPayloadPreview()
 
 	case "1", "2", "3", "4", "5", "6", "7":
 		m.editTab = int(k.Runes[0] - '1')
@@ -936,12 +948,15 @@ func (m *tui) View() string {
 	case screenHelp:
 		return m.helpView()
 
+	case screenPayload:
+		return m.payloadView()
+
 	case screenServiceEdit:
 		if m.tabActive {
 			return m.serviceSelectorView()
 		}
 		if m.form != nil {
-			return m.tabBar(m.editTab) + "\n" + sHelp.Render("  ctrl+r next tab · esc tab list") + "\n" + m.form.View()
+			return m.tabBar(m.editTab) + "\n" + sHelp.Render("  esc tab selector  ·  s save") + "\n" + m.form.View()
 		}
 
 	case screenGlobal:
@@ -978,10 +993,10 @@ func (m *tui) tabBar(active int) string {
 		label := fmt.Sprintf("%d %s", i+1, name)
 		num := strconv.Itoa(i + 1)
 		if i == active {
-			full = append(full, sPrimaryBold.Render(label))
-			numbered = append(numbered, sPrimaryBold.Render(label))
+			full = append(full, sTabActive.Render(label))
+			numbered = append(numbered, sTabActive.Render(label))
 		} else {
-			full = append(full, sMuted.Render(label))
+			full = append(full, sTabInactive.Render(label))
 			numbered = append(numbered, sMuted.Render(num))
 		}
 	}
@@ -995,7 +1010,7 @@ func (m *tui) tabBar(active int) string {
 	}
 	bar := fmt.Sprintf("  %s  %s",
 		sMuted.Render(fmt.Sprintf("tab %d/%d", active+1, len(serviceTabNames))),
-		sPrimaryBold.Render(serviceTabNames[active]))
+		sTabActive.Render(serviceTabNames[active]))
 	return bar + "\n  " + m.sepLine()
 }
 
@@ -1035,7 +1050,7 @@ func (m *tui) serviceSelectorView() string {
 	}
 
 	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-7 open  ·  s save  ·  esc back"))
+	rows = append(rows, sHelp.Render("  ↑↓/[]/1-7 navigate  ·  enter open  ·  s save  ·  ctrl+q preview  ·  esc back"))
 	rows = append(rows, sHelp.Render("  ~ inherited from template   ✎ your override"))
 	return strings.Join(rows, "\n")
 }
@@ -1106,12 +1121,12 @@ func (m *tui) helpView() string {
 		"  " + sBold.Render("Service list"),
 		sHelp.Render("    ↑↓/jk move · enter edit · n new"),
 		sHelp.Render("    space enable · d delete"),
-		sHelp.Render("    r run · t test · g config · q quit"),
+		sHelp.Render("    r run · t test · g config · ctrl+q preview · q quit"),
 		"",
-		"  " + sBold.Render("Editor"),
-		sHelp.Render("    enter/1-7 open · s save · esc back"),
-		sHelp.Render("    ctrl+r next tab · / filter templates"),
-		sHelp.Render("    alt+enter new line in text fields"),
+		"  " + sBold.Render("Editor (tab selector)"),
+		sHelp.Render("    enter/1-7/]/[ open/navigate · s save · esc back"),
+		sHelp.Render("    ctrl+q payload preview"),
+		sHelp.Render("    / filter templates · alt+enter new line in text fields"),
 		"",
 		"  " + sBold.Render("Attributes"),
 		sHelp.Render("    ~ inherited · ✎ service override"),
@@ -1159,7 +1174,9 @@ func (m *tui) listView() string {
 
 func (m *tui) renderHeader() string {
 	indicator := sMuted.Render("○ stopped")
-	if m.status.Running {
+	if m.testing {
+		indicator = sPrimary.Render(spinnerFrames[m.spinnerIdx] + " testing…")
+	} else if m.status.Running {
 		indicator = sSuccess.Render("● running")
 	}
 
@@ -1200,10 +1217,11 @@ func (m *tui) renderHeader() string {
 // effective resource and span attributes; the others stay compact.
 func (m *tui) renderService(svc Service, expanded bool) string {
 	cursor := "  "
-	name := svc.Name
+	style := colorForService(svc.Name)
+	name := style.Render(svc.Name)
 	if expanded {
 		cursor = sPrimary.Render("▶ ")
-		name = sBold.Render(name)
+		name = style.Bold(true).Render(svc.Name)
 	}
 
 	dot := sMuted.Render("○")
@@ -1299,21 +1317,36 @@ func (m *tui) attrLine(label, mark string, attrs map[string]AttrValue) string {
 	return "    " + sMuted.Render(label+" "+mark+" "+preview)
 }
 
+// renderHint formats a single help entry: the key letter(s) in accent bold,
+// the description in muted — e.g. "n new" → bold-sky "n" + muted " new".
+func renderHint(hint string) string {
+	i := strings.IndexByte(hint, ' ')
+	if i < 0 {
+		return sHelpKey.Render(hint)
+	}
+	return sHelpKey.Render(hint[:i]) + sHelp.Render(hint[i:])
+}
+
 func (m *tui) renderHelp() string {
 	full := []string{
 		"n new", "↵ edit", "d delete", "␣ toggle",
-		"r run/stop", "t test", "g config", "? help", "q quit",
+		"r run/stop", "t test", "g config", "ctrl+q preview", "? help", "q quit",
 	}
 	medium := []string{"n new", "↵ edit", "r run/stop", "g config", "? help", "q quit"}
 	short := []string{"↵ edit", "r run", "? help", "q quit"}
 
+	sep := sHelp.Render("  ·  ")
 	for _, set := range [][]string{full, medium, short} {
-		line := "  " + strings.Join(set, "  ·  ")
+		parts := make([]string, len(set))
+		for i, h := range set {
+			parts[i] = renderHint(h)
+		}
+		line := "  " + strings.Join(parts, sep)
 		if lipgloss.Width(line) <= m.width {
-			return sHelp.Render(line)
+			return line
 		}
 	}
-	return sHelp.Render("  ? help")
+	return renderHint("? help")
 }
 
 // textLines sizes an attribute textarea to the terminal height.
@@ -1388,6 +1421,90 @@ func attrValueText(v AttrValue, quote bool) string {
 	}
 }
 
+
+// inheritedResAttrsNote returns a multi-line description of the resource
+// attributes inherited by svc from global config, infra template, and Istio
+// mesh. All attributes are shown (no truncation). Returns ("", 0) when nothing
+// is inherited.
+func inheritedResAttrsNote(cfg Config, svc Service, budget int) (string, int) {
+	type src struct {
+		label string
+		attrs map[string]AttrValue
+	}
+	var sources []src
+	if len(cfg.Attributes) > 0 {
+		sources = append(sources, src{"global", cfg.Attributes})
+	}
+	if infra := infraDefaults(svc); len(infra) > 0 {
+		sources = append(sources, src{svc.InfraTemplate, infra})
+	}
+
+	if len(sources) == 0 && svc.Name == "" {
+		return "", 0
+	}
+	var lines []string
+	for _, s := range sources {
+		lines = append(lines, attrsBlock(s.label, s.attrs, budget)...)
+	}
+	if svc.Name != "" {
+		lines = append(lines, "service.name="+svc.Name+" (always set)")
+	}
+	return strings.Join(lines, "\n"), len(lines)
+}
+
+// inheritedSpanAttrsNote returns a multi-line description of the span
+// attributes provided by the selected template. All attributes are shown.
+// Returns ("", 0) for no template.
+func inheritedSpanAttrsNote(template string, budget int) (string, int) {
+	tmpl := templateDefaults(template)
+	if len(tmpl) == 0 {
+		return "", 0
+	}
+	lines := attrsBlock(template, tmpl, budget)
+	return strings.Join(lines, "\n"), len(lines)
+}
+
+// attrsBlock returns a header line ("label (N)") followed by wrapped lines of
+// "key=val" pairs. Every attribute is shown; pairs wrap when the next one
+// would exceed lineWidth characters.
+func attrsBlock(label string, attrs map[string]AttrValue, lineWidth int) []string {
+	header := fmt.Sprintf("%s (%d)", label, len(attrs))
+	if len(attrs) == 0 {
+		return []string{header}
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	budget := lineWidth - 2 // 2-char indent on each wrapped line
+	if budget < 20 {
+		budget = 20
+	}
+	var result []string
+	var cur []string
+	used := 0
+	for _, k := range keys {
+		pair := k + "=" + attrValueText(attrs[k], false)
+		addLen := len(pair)
+		if len(cur) > 0 {
+			addLen += 2 // "  " separator
+		}
+		if len(cur) > 0 && used+addLen > budget {
+			result = append(result, "  "+strings.Join(cur, "  "))
+			cur = nil
+			used = 0
+			addLen = len(pair)
+		}
+		cur = append(cur, pair)
+		used += addLen
+	}
+	if len(cur) > 0 {
+		result = append(result, "  "+strings.Join(cur, "  "))
+	}
+	return append([]string{header}, result...)
+}
 
 // attrsToText serialises a map[string]AttrValue to a human-editable
 // "key=value" text (one entry per line, sorted by key).
@@ -1476,6 +1593,197 @@ func parseAttrValue(v string) AttrValue {
 	}
 	// 5. Fallback: string
 	return strAttrVal(v)
+}
+
+// ── payload preview ────────────────────────────────────────────────────────────
+
+// openPayloadPreview builds a human-readable config summary for the currently
+// selected service and navigates to screenPayload. Available from both the list
+// and the service editor tab selector (ctrl+q).
+func (m *tui) openPayloadPreview() (tea.Model, tea.Cmd) {
+	var svc Service
+	if m.screen == screenServiceEdit {
+		svc = m.buildServiceFromFields()
+	} else if len(m.cfg.Services) > 0 && m.cursor < len(m.cfg.Services) {
+		svc = m.cfg.Services[m.cursor]
+	} else {
+		return m, nil
+	}
+	m.payloadText = m.buildPayloadPreview(svc)
+	m.payloadScroll = 0
+	m.screen = screenPayload
+	return m, nil
+}
+
+// updatePayload handles keys while screenPayload is active.
+// Arrow keys scroll; any other key closes.
+func (m *tui) updatePayload(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	all := strings.Split(m.payloadText, "\n")
+	pageSize := m.height - 4
+	if pageSize < 5 {
+		pageSize = 5
+	}
+	maxScroll := len(all) - pageSize
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	switch k.String() {
+	case "up", "k":
+		if m.payloadScroll > 0 {
+			m.payloadScroll--
+		}
+	case "down", "j":
+		if m.payloadScroll < maxScroll {
+			m.payloadScroll++
+		}
+	case "pgup", "b":
+		m.payloadScroll -= pageSize
+		if m.payloadScroll < 0 {
+			m.payloadScroll = 0
+		}
+	case "pgdown", "f":
+		m.payloadScroll += pageSize
+		if m.payloadScroll > maxScroll {
+			m.payloadScroll = maxScroll
+		}
+	default:
+		m.screen = screenList
+	}
+	return m, nil
+}
+
+// payloadView renders the payload preview, paginated to the terminal height.
+func (m *tui) payloadView() string {
+	all := strings.Split(m.payloadText, "\n")
+	pageSize := m.height - 4
+	if pageSize < 5 {
+		pageSize = 5
+	}
+	start := m.payloadScroll
+	if start < 0 {
+		start = 0
+	}
+	end := start + pageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	visible := strings.Join(all[start:end], "\n")
+	footer := sHelp.Render(fmt.Sprintf("  ↑↓/jk scroll  ·  pgup/pgdn page  ·  %d/%d lines  ·  any other key closes", start+1, len(all)))
+	return visible + "\n\n" + footer
+}
+
+// buildPayloadPreview returns a formatted multi-line string showing the
+// effective configuration that will be emitted for svc: resource attrs
+// (merged global → infra → service), span attrs, metric config, and signals.
+func (m *tui) buildPayloadPreview(svc Service) string {
+	cfg := m.cfg
+	svc = normalizeService(svc)
+
+	var b strings.Builder
+	addRow := func(label, value string) {
+		b.WriteString(fmt.Sprintf("  %-22s %s\n", label, value))
+	}
+
+	// ── header ────────────────────────────────────────────────────────────
+	b.WriteString("  " + sPrimaryBold.Render("otgen") + sMuted.Render("  payload preview") + "\n")
+	b.WriteString("  " + m.sepLine() + "\n\n")
+
+	// ── service settings ──────────────────────────────────────────────────
+	b.WriteString(sBold.Render("  Service: ") + colorForService(svc.Name).Render(svc.Name) + "\n\n")
+
+	signals := "all (spans + metrics + logs)"
+	if len(svc.Signals) > 0 {
+		sl := append([]string(nil), svc.Signals...)
+		sort.Strings(sl)
+		signals = strings.Join(sl, " + ")
+	}
+	addRow("Signals", signals)
+	addRow("Interval", fmt.Sprintf("%ds", svc.Interval))
+	addRow("Failure rate", fmt.Sprintf("%d%%", svc.FailureRate))
+
+	if svc.Template != "" {
+		addRow("Span template", svc.Template)
+	}
+	addRow("Span kind", svc.SpanKind)
+	if svc.ChildSpans > 0 {
+		addRow("Local child spans", strconv.Itoa(svc.ChildSpans))
+	}
+	if svc.InfraTemplate != "" {
+		addRow("Infra template", svc.InfraTemplate)
+	}
+	if svc.Mesh {
+		addRow("Istio mesh", "on")
+	}
+	if len(svc.DownstreamCalls) > 0 {
+		addRow("Downstream calls", strings.Join(svc.DownstreamCalls, ", "))
+	}
+	if svc.hasSignal(signalMetrics) {
+		mc := effectiveMetricConfig(svc)
+		addRow("Metric", fmt.Sprintf("%s %s (%s)", mc.Name, mc.Unit, mc.Type))
+	}
+	if svc.hasSignal(signalLogs) {
+		addRow("Log severity", strings.ToUpper(effectiveLogSeverity(svc)))
+	}
+
+	b.WriteString("\n  " + m.sepLine() + "\n\n")
+
+	// ── resource attributes ───────────────────────────────────────────────
+	b.WriteString(sBold.Render("  Resource attributes") + sMuted.Render(" (global → infra → service)") + "\n\n")
+	if len(cfg.Attributes) > 0 {
+		b.WriteString(sMuted.Render("  global:") + "\n")
+		for _, k := range sortedKeys(cfg.Attributes) {
+			b.WriteString(fmt.Sprintf("    %s = %s\n", k, attrValueText(cfg.Attributes[k], false)))
+		}
+	}
+	infra := infraDefaults(svc)
+	if len(infra) > 0 {
+		b.WriteString(sMuted.Render(fmt.Sprintf("  %s (infra template):", svc.InfraTemplate)) + "\n")
+		for _, k := range sortedKeys(infra) {
+			b.WriteString(fmt.Sprintf("    %s = %s\n", k, attrValueText(infra[k], false)))
+		}
+	}
+	b.WriteString(sMuted.Render("  service:") + "\n")
+	b.WriteString(fmt.Sprintf("    service.name = %s\n", svc.Name))
+	for _, k := range sortedKeys(svc.Attributes) {
+		b.WriteString(fmt.Sprintf("    %s = %s\n", k, attrValueText(svc.Attributes[k], false)))
+	}
+
+	b.WriteString("\n")
+
+	// ── span attributes ───────────────────────────────────────────────────
+	if svc.hasSignal(signalSpans) {
+		b.WriteString(sBold.Render("  Span attributes") + sMuted.Render(" (template → overrides)") + "\n\n")
+		tmpl := templateDefaults(svc.Template)
+		if len(tmpl) > 0 {
+			b.WriteString(sMuted.Render(fmt.Sprintf("  %s (template):", svc.Template)) + "\n")
+			for _, k := range sortedKeys(tmpl) {
+				b.WriteString(fmt.Sprintf("    %s = %s\n", k, attrValueText(tmpl[k], false)))
+			}
+		}
+		if len(svc.SpanAttrs) > 0 {
+			b.WriteString(sMuted.Render("  overrides:") + "\n")
+			for _, k := range sortedKeys(svc.SpanAttrs) {
+				b.WriteString(fmt.Sprintf("    %s = %s\n", k, attrValueText(svc.SpanAttrs[k], false)))
+			}
+		}
+		if len(tmpl) == 0 && len(svc.SpanAttrs) == 0 {
+			b.WriteString(sMuted.Render("  none") + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString(sHelp.Render("  ↑↓/jk scroll  ·  pgup/pgdn page  ·  any other key closes"))
+	return b.String()
+}
+
+// sortedKeys returns the map's keys in ascending order.
+func sortedKeys(m map[string]AttrValue) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ── misc ──────────────────────────────────────────────────────────────────────

@@ -221,15 +221,35 @@ func TestEditorTabsFitStandardTerminal(t *testing.T) {
 	}
 }
 
-func TestCtrlRMovesToNextTab(t *testing.T) {
+// TestBracketNavigationCyclesTabs checks that ] and [ move forward and backward
+// through editor tabs while the tab selector is focused (ctrl+r was removed and
+// replaced with ] / [ so it stays out of huh's key space).
+func TestBracketNavigationCyclesTabs(t *testing.T) {
 	m := testTUI(t)
 	m.loadServiceFields(0)
-	m.screen, m.tabActive, m.editTab = screenServiceEdit, false, 0
-	m.form = m.makeServiceTabForm(0)
+	m.screen, m.tabActive, m.editTab = screenServiceEdit, true, 0
 
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m.updateServiceSelector(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
 	if m.editTab != 1 {
-		t.Fatalf("ctrl+r moved to tab %d, want 1", m.editTab)
+		t.Fatalf("] moved to tab %d, want 1", m.editTab)
+	}
+
+	m.updateServiceSelector(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[")})
+	if m.editTab != 0 {
+		t.Fatalf("[ moved to tab %d, want 0", m.editTab)
+	}
+
+	// [ at the first tab must not underflow.
+	m.updateServiceSelector(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[")})
+	if m.editTab != 0 {
+		t.Fatalf("[ from tab 0 moved to tab %d, want 0", m.editTab)
+	}
+
+	// ] at the last tab must not overflow.
+	m.editTab = len(serviceTabNames) - 1
+	m.updateServiceSelector(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
+	if m.editTab != len(serviceTabNames)-1 {
+		t.Fatalf("] from last tab moved to tab %d, want %d", m.editTab, len(serviceTabNames)-1)
 	}
 }
 

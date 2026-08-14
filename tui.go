@@ -102,7 +102,7 @@ type tui struct {
 	fInterval      string
 	fChildSpans    string
 	fSignals       []string
-	fDownstream    string
+	fDownstream    []string
 	fMetricType    string
 	fMetricName    string
 	fMetricUnit    string
@@ -345,7 +345,7 @@ func (m *tui) loadServiceFields(idx int) {
 		m.fInterval = "5"
 		m.fChildSpans = "0"
 		m.fSignals = []string{"logs", "metrics", "spans"}
-		m.fDownstream = ""
+		m.fDownstream = nil
 		m.fMetricType = "sum"
 		m.fMetricName = ""
 		m.fMetricUnit = ""
@@ -369,7 +369,7 @@ func (m *tui) loadServiceFields(idx int) {
 			m.fSignals = append([]string(nil), svc.Signals...)
 			sort.Strings(m.fSignals)
 		}
-		m.fDownstream = callsToText(svc.DownstreamCalls)
+		m.fDownstream = append([]string(nil), svc.DownstreamCalls...)
 		effectiveMetric := effectiveMetricConfig(svc)
 		m.fMetricType = effectiveMetric.Type
 		m.fMetricName = ""
@@ -422,7 +422,7 @@ func (m *tui) buildServiceFromFields() Service {
 		Interval:        interval,
 		ChildSpans:      childSpans,
 		Signals:         signals,
-		DownstreamCalls: parseCalls(m.fDownstream),
+		DownstreamCalls: append([]string(nil), m.fDownstream...),
 		Metric:          metric,
 		LogSeverity:     severity,
 		Mesh:            m.fMesh,
@@ -497,7 +497,6 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 					Inline(true).
 					Affirmative("on").
 					Negative("off").
-					Description("span semantics + mesh metrics").
 					Value(&m.fMesh),
 			),
 		).WithWidth(w)
@@ -544,13 +543,27 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 		).WithWidth(w)
 
 	case tabCalls:
+		var callOpts []huh.Option[string]
+		for i, svc := range m.cfg.Services {
+			if i != m.editIdx {
+				callOpts = append(callOpts, huh.NewOption(svc.Name, svc.Name))
+			}
+		}
+		if len(callOpts) == 0 {
+			return huh.NewForm(
+				huh.NewGroup(
+					huh.NewNote().
+						Title("Downstream calls").
+						Description("No other services configured yet.\nAdd more services to set up call chains."),
+				),
+			).WithWidth(w)
+		}
 		return huh.NewForm(
 			huh.NewGroup(
-				huh.NewText().
+				huh.NewMultiSelect[string]().
 					Title("Downstream calls").
-					Description("Example shown when empty · one service per line · cycles rejected").
-					Placeholder("payment-svc\nledger-svc").
-					Lines(m.textLines()).
+					Description("Services this one calls · space to toggle").
+					Options(callOpts...).
 					Value(&m.fDownstream),
 			),
 		).WithWidth(w)
@@ -1051,12 +1064,8 @@ func (m *tui) serviceTabSummaries() []string {
 		spans += fmt.Sprintf(" · +%d local child", n)
 	}
 	calls := "none"
-	if parsed := parseCalls(m.fDownstream); len(parsed) > 0 {
-		names := make([]string, 0, len(parsed))
-		for _, call := range parsed {
-			names = append(names, call)
-		}
-		calls = truncate(strings.Join(names, ", "), max(12, m.width-32))
+	if len(m.fDownstream) > 0 {
+		calls = truncate(strings.Join(m.fDownstream, ", "), max(12, m.width-32))
 	}
 	metric := effectiveMetricConfig(Service{Name: strings.TrimSpace(m.fName), Metric: &MetricConfig{
 		Type: m.fMetricType, Name: m.fMetricName, Unit: m.fMetricUnit,
@@ -1379,25 +1388,6 @@ func attrValueText(v AttrValue, quote bool) string {
 	}
 }
 
-func callsToText(calls []string) string {
-	lines := make([]string, 0, len(calls))
-	for _, call := range calls {
-		if name := strings.TrimSpace(call); name != "" {
-			lines = append(lines, name)
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func parseCalls(text string) []string {
-	var calls []string
-	for _, line := range strings.Split(text, "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			calls = append(calls, name)
-		}
-	}
-	return calls
-}
 
 // attrsToText serialises a map[string]AttrValue to a human-editable
 // "key=value" text (one entry per line, sorted by key).

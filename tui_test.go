@@ -94,10 +94,8 @@ func TestServiceFormKeepsMeshDescriptionReadable(t *testing.T) {
 	m.form = m.makeServiceTabForm(tabService)
 	m.form.Init()
 	view := stripANSI(m.form.View())
-	for _, want := range []string{"Istio mesh", "span semantics + mesh metrics"} {
-		if !strings.Contains(view, want) {
-			t.Errorf("service form missing %q:\n%s", want, view)
-		}
+	if !strings.Contains(view, "Istio mesh") {
+		t.Errorf("service form missing %q:\n%s", "Istio mesh", view)
 	}
 	if strings.Contains(view, "meshspan") {
 		t.Fatalf("mesh label and description run together:\n%s", view)
@@ -252,7 +250,7 @@ func TestNumericNavigationReachesAllTabs(t *testing.T) {
 func TestCallsAndMetricsLogsRoundTrip(t *testing.T) {
 	m := testTUI(t)
 	m.loadServiceFields(0)
-	m.fDownstream = "payment-svc\n inventory-svc\n"
+	m.fDownstream = []string{"payment-svc", "inventory-svc"}
 	m.fMetricType = "histogram"
 	m.fMetricName = "latency"
 	m.fMetricUnit = "ms"

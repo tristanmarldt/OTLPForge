@@ -166,7 +166,9 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 		firstOpt string
 	}{
 		{tabSpans, "gRPC", "None (generic)"},
-		{tabInfrastructure, "  Cloud Foundry / Tanzu", "  Vanilla / generic"},
+		// Infrastructure: two-field hierarchy. Check the category select spans
+		// None (first) through Other (last) without clipping.
+		{tabInfrastructure, "Other", "None"},
 	}
 
 	m := testTUI(t)
@@ -188,14 +190,11 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 	}
 }
 
-// TestEditorTabsFitStandardTerminal keeps every editor tab inside a 32-row
-// terminal. huh cannot scroll a form that overflows its group, so a tab taller
-// than the terminal has fields the user can focus but never see.
-// Infrastructure uses 32 rows: 22 template options (17 real + 5 group headers)
-// plus the tab bar and hint line exceed 24. 32 is the common default in most
-// terminal emulators and is a reasonable minimum for this tab.
+// TestEditorTabsFitStandardTerminal keeps every editor tab inside a classic
+// 24-row terminal. huh cannot scroll a form that overflows its group, so a tab
+// taller than the terminal has fields the user can focus but never see.
 func TestEditorTabsFitStandardTerminal(t *testing.T) {
-	const rows = 32
+	const rows = 24
 
 	m := testTUI(t)
 	m.width, m.height = 100, rows

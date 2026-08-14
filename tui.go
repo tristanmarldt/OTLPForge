@@ -78,6 +78,7 @@ type tui struct {
 	// bound form fields – service editor
 	fName          string
 	fTemplate      string
+	fInfraCategory string // "" | "kubernetes" | "container" | "serverless" | "host" | "other"
 	fInfraTemplate string
 	fSpanKind      string
 	fFailure       string
@@ -335,6 +336,7 @@ func (m *tui) loadServiceFields(idx int) {
 	if idx == -1 {
 		m.fName = defaultServiceNamePrefix
 		m.fTemplate = ""
+		m.fInfraCategory = ""
 		m.fInfraTemplate = ""
 		m.fSpanKind = "server"
 		m.fFailure = "5"
@@ -354,6 +356,7 @@ func (m *tui) loadServiceFields(idx int) {
 		svc := m.cfg.Services[idx]
 		m.fName = svc.Name
 		m.fTemplate = svc.Template
+		m.fInfraCategory = infraCategoryOf[svc.InfraTemplate]
 		m.fInfraTemplate = svc.InfraTemplate
 		m.fSpanKind = svc.SpanKind
 		m.fFailure = strconv.Itoa(svc.FailureRate)
@@ -437,6 +440,61 @@ func (m *tui) hasUnsavedChanges() bool {
 
 const attrTypeHint = "key=value · bool/number auto-detected · quote strings"
 const defaultServiceNamePrefix = "otgen-"
+
+// ── infrastructure template hierarchy ─────────────────────────────────────────
+
+// infraCategoryOf maps each template ID to its logical category so that
+// loadServiceFields can restore fInfraCategory from a saved InfraTemplate.
+var infraCategoryOf = map[string]string{
+	"k8s": "kubernetes", "eks": "kubernetes", "gke": "kubernetes",
+	"aks": "kubernetes", "openshift": "kubernetes",
+	"docker": "container", "containerd": "container",
+	"ecs": "container", "azure-container-apps": "container",
+	"lambda": "serverless", "azure-functions": "serverless", "gcp-functions": "serverless",
+	"host": "host", "process": "host",
+	"nomad": "other", "cloudfoundry": "other",
+}
+
+// infraTemplatesForCategory returns the Select options for a given category.
+// An empty category ("None") returns a single placeholder so the value
+// pointer is cleanly set to "" when the user picks None.
+func infraTemplatesForCategory(cat string) []huh.Option[string] {
+	switch cat {
+	case "kubernetes":
+		return []huh.Option[string]{
+			huh.NewOption("Vanilla / generic", "k8s"),
+			huh.NewOption("Amazon EKS", "eks"),
+			huh.NewOption("Google GKE", "gke"),
+			huh.NewOption("Azure AKS", "aks"),
+			huh.NewOption("Red Hat OpenShift", "openshift"),
+		}
+	case "container":
+		return []huh.Option[string]{
+			huh.NewOption("Docker", "docker"),
+			huh.NewOption("containerd", "containerd"),
+			huh.NewOption("Amazon ECS / Fargate", "ecs"),
+			huh.NewOption("Azure Container Apps", "azure-container-apps"),
+		}
+	case "serverless":
+		return []huh.Option[string]{
+			huh.NewOption("AWS Lambda", "lambda"),
+			huh.NewOption("Azure Functions", "azure-functions"),
+			huh.NewOption("Google Cloud Functions", "gcp-functions"),
+		}
+	case "host":
+		return []huh.Option[string]{
+			huh.NewOption("VM / bare metal", "host"),
+			huh.NewOption("Process", "process"),
+		}
+	case "other":
+		return []huh.Option[string]{
+			huh.NewOption("HashiCorp Nomad", "nomad"),
+			huh.NewOption("Cloud Foundry / Tanzu", "cloudfoundry"),
+		}
+	default: // "" = None
+		return []huh.Option[string]{huh.NewOption("—", "")}
+	}
+}
 
 func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
@@ -605,37 +663,23 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
-					Title("Infrastructure template").
-					Description("Resource attributes for the deployment environment · / to filter").
+					Title("Category").
+					Description("Deployment environment type").
 					Options(
 						huh.NewOption("None", ""),
-						// Kubernetes ──────────────────────────────────────────
-						huh.NewOption("── Kubernetes ──", ""),
-						huh.NewOption("  Vanilla / generic", "k8s"),
-						huh.NewOption("  Amazon EKS", "eks"),
-						huh.NewOption("  Google GKE", "gke"),
-						huh.NewOption("  Azure AKS", "aks"),
-						huh.NewOption("  Red Hat OpenShift", "openshift"),
-						// Container ───────────────────────────────────────────
-						huh.NewOption("── Container ──", ""),
-						huh.NewOption("  Docker", "docker"),
-						huh.NewOption("  containerd", "containerd"),
-						huh.NewOption("  Amazon ECS / Fargate", "ecs"),
-						huh.NewOption("  Azure Container Apps", "azure-container-apps"),
-						// Serverless ──────────────────────────────────────────
-						huh.NewOption("── Serverless ──", ""),
-						huh.NewOption("  AWS Lambda", "lambda"),
-						huh.NewOption("  Azure Functions", "azure-functions"),
-						huh.NewOption("  Google Cloud Functions", "gcp-functions"),
-						// Host ────────────────────────────────────────────────
-						huh.NewOption("── Host ──", ""),
-						huh.NewOption("  VM / bare metal", "host"),
-						huh.NewOption("  Process", "process"),
-						// Other ───────────────────────────────────────────────
-						huh.NewOption("── Other ──", ""),
-						huh.NewOption("  HashiCorp Nomad", "nomad"),
-						huh.NewOption("  Cloud Foundry / Tanzu", "cloudfoundry"),
+						huh.NewOption("Kubernetes", "kubernetes"),
+						huh.NewOption("Container", "container"),
+						huh.NewOption("Serverless", "serverless"),
+						huh.NewOption("Host", "host"),
+						huh.NewOption("Other", "other"),
 					).
+					Value(&m.fInfraCategory),
+				huh.NewSelect[string]().
+					Title("Template").
+					Description("Specific environment variant · / to filter").
+					OptionsFunc(func() []huh.Option[string] {
+						return infraTemplatesForCategory(m.fInfraCategory)
+					}, &m.fInfraCategory).
 					Value(&m.fInfraTemplate),
 			),
 		).WithWidth(w)

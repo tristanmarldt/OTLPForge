@@ -182,6 +182,7 @@ func buildTrace(cfg Config, root Service, now time.Time) (*generatedTrace, error
 
 func downstreamCallAttrs(target Service, failed bool) []*commonpb.KeyValue {
 	attrs := []*commonpb.KeyValue{
+		stringAttr("peer.service", target.Name),
 		stringAttr("server.address", target.Name+".service"),
 		stringAttr("otgen.target.service", target.Name),
 	}

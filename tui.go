@@ -111,8 +111,10 @@ type tui struct {
 	flashEnd time.Time
 
 	// payload preview (screenPayload)
-	payloadText   string
-	payloadScroll int
+	payloadText      string
+	payloadScroll    int
+	payloadPrevScreen    tuiScreen // screen to restore when preview closes
+	payloadPrevTabActive bool      // tabActive to restore when preview closes
 }
 
 func NewTUIModel(app *App) *tui {
@@ -1667,6 +1669,8 @@ func parseAttrValue(v string) AttrValue {
 // openPayloadPreview builds a human-readable config summary for the currently
 // selected service and navigates to screenPayload. Available from both the list
 // and the service editor tab selector (ctrl+q).
+// The caller's screen and tabActive state are saved so that closing the preview
+// returns exactly where the user came from.
 func (m *tui) openPayloadPreview() (tea.Model, tea.Cmd) {
 	var svc Service
 	if m.screen == screenServiceEdit {
@@ -1678,6 +1682,8 @@ func (m *tui) openPayloadPreview() (tea.Model, tea.Cmd) {
 	}
 	m.payloadText = m.buildPayloadPreview(svc)
 	m.payloadScroll = 0
+	m.payloadPrevScreen = m.screen
+	m.payloadPrevTabActive = m.tabActive
 	m.screen = screenPayload
 	return m, nil
 }
@@ -1714,7 +1720,8 @@ func (m *tui) updatePayload(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.payloadScroll = maxScroll
 		}
 	default:
-		m.screen = screenList
+		m.screen = m.payloadPrevScreen
+		m.tabActive = m.payloadPrevTabActive
 	}
 	return m, nil
 }

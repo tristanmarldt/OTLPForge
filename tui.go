@@ -609,22 +609,32 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 					Description("Resource attributes for the deployment environment · / to filter").
 					Options(
 						huh.NewOption("None", ""),
-						huh.NewOption("Kubernetes · vanilla", "k8s"),
-						huh.NewOption("Kubernetes · Amazon EKS", "eks"),
-						huh.NewOption("Kubernetes · Google GKE", "gke"),
-						huh.NewOption("Kubernetes · Azure AKS", "aks"),
-						huh.NewOption("Kubernetes · Red Hat OpenShift", "openshift"),
-						huh.NewOption("Container · Docker", "docker"),
-						huh.NewOption("Container · containerd", "containerd"),
-						huh.NewOption("Container · Amazon ECS / Fargate", "ecs"),
-						huh.NewOption("Container · Azure Container Apps", "azure-container-apps"),
-						huh.NewOption("Serverless · AWS Lambda", "lambda"),
-						huh.NewOption("Serverless · Azure Functions", "azure-functions"),
-						huh.NewOption("Serverless · Google Cloud Functions", "gcp-functions"),
-						huh.NewOption("Host · VM / bare metal", "host"),
-						huh.NewOption("Host · process", "process"),
-						huh.NewOption("Scheduler · HashiCorp Nomad", "nomad"),
-						huh.NewOption("PaaS · Cloud Foundry / Tanzu", "cloudfoundry"),
+						// Kubernetes ──────────────────────────────────────────
+						huh.NewOption("── Kubernetes ──", ""),
+						huh.NewOption("  Vanilla / generic", "k8s"),
+						huh.NewOption("  Amazon EKS", "eks"),
+						huh.NewOption("  Google GKE", "gke"),
+						huh.NewOption("  Azure AKS", "aks"),
+						huh.NewOption("  Red Hat OpenShift", "openshift"),
+						// Container ───────────────────────────────────────────
+						huh.NewOption("── Container ──", ""),
+						huh.NewOption("  Docker", "docker"),
+						huh.NewOption("  containerd", "containerd"),
+						huh.NewOption("  Amazon ECS / Fargate", "ecs"),
+						huh.NewOption("  Azure Container Apps", "azure-container-apps"),
+						// Serverless ──────────────────────────────────────────
+						huh.NewOption("── Serverless ──", ""),
+						huh.NewOption("  AWS Lambda", "lambda"),
+						huh.NewOption("  Azure Functions", "azure-functions"),
+						huh.NewOption("  Google Cloud Functions", "gcp-functions"),
+						// Host ────────────────────────────────────────────────
+						huh.NewOption("── Host ──", ""),
+						huh.NewOption("  VM / bare metal", "host"),
+						huh.NewOption("  Process", "process"),
+						// Other ───────────────────────────────────────────────
+						huh.NewOption("── Other ──", ""),
+						huh.NewOption("  HashiCorp Nomad", "nomad"),
+						huh.NewOption("  Cloud Foundry / Tanzu", "cloudfoundry"),
 					).
 					Value(&m.fInfraTemplate),
 			),
@@ -1447,7 +1457,7 @@ func inheritedResAttrsNote(cfg Config, svc Service, budget int) (string, int) {
 		lines = append(lines, attrsBlock(s.label, s.attrs, budget)...)
 	}
 	if svc.Name != "" {
-		lines = append(lines, "service.name="+svc.Name+" (always set)")
+		lines = append(lines, "service.name="+noteEscape(svc.Name)+" (always set)")
 	}
 	return strings.Join(lines, "\n"), len(lines)
 }
@@ -1464,11 +1474,24 @@ func inheritedSpanAttrsNote(template string, budget int) (string, int) {
 	return strings.Join(lines, "\n"), len(lines)
 }
 
+// noteEscape escapes characters that huh's Note.Description mini-renderer
+// treats as markdown: _ (italic), * (bold), ` (code). A leading \ causes
+// the renderer to emit the next rune literally, so \_  →  _.
+// Must be applied to any user-visible string passed to huh.NewNote().Description().
+func noteEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	s = strings.ReplaceAll(s, "*", `\*`)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	return s
+}
+
 // attrsBlock returns a header line ("label (N)") followed by wrapped lines of
 // "key=val" pairs. Every attribute is shown; pairs wrap when the next one
 // would exceed lineWidth characters.
+// Keys and values are noteEscape-d so that underscores survive huh's renderer.
 func attrsBlock(label string, attrs map[string]AttrValue, lineWidth int) []string {
-	header := fmt.Sprintf("%s (%d)", label, len(attrs))
+	header := fmt.Sprintf("%s (%d)", noteEscape(label), len(attrs))
 	if len(attrs) == 0 {
 		return []string{header}
 	}
@@ -1486,7 +1509,7 @@ func attrsBlock(label string, attrs map[string]AttrValue, lineWidth int) []strin
 	var cur []string
 	used := 0
 	for _, k := range keys {
-		pair := k + "=" + attrValueText(attrs[k], false)
+		pair := noteEscape(k) + "=" + noteEscape(attrValueText(attrs[k], false))
 		addLen := len(pair)
 		if len(cur) > 0 {
 			addLen += 2 // "  " separator

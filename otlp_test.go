@@ -20,6 +20,27 @@ func stringAttrValue(attrs []*commonpb.KeyValue, key string) string {
 	return ""
 }
 
+func payloadFor(t *testing.T, cfg Config, svc Service, kind signalKind) []byte {
+	t.Helper()
+	svc.Signals = []string{string(kind)}
+	cfg.Services = []Service{svc}
+	payloads, err := buildEmissionPayloads(normalizeConfig(cfg), svc)
+	if err != nil {
+		t.Fatalf("buildEmissionPayloads: %v", err)
+	}
+	switch kind {
+	case signalSpans:
+		return payloads.Traces
+	case signalMetrics:
+		return payloads.Metrics
+	case signalLogs:
+		return payloads.Logs
+	default:
+		t.Fatalf("unsupported signal %s", kind)
+		return nil
+	}
+}
+
 func TestBuildPayloadCreatesSpanForService(t *testing.T) {
 	cfg := Config{Endpoint: "https://example.com"}
 	svc := Service{
@@ -33,10 +54,7 @@ func TestBuildPayloadCreatesSpanForService(t *testing.T) {
 		},
 	}
 
-	payload, err := buildPayload(cfg, svc, signalSpans)
-	if err != nil {
-		t.Fatalf("buildPayload returned error: %v", err)
-	}
+	payload := payloadFor(t, cfg, svc, signalSpans)
 
 	var req collectortracepb.ExportTraceServiceRequest
 	if err := proto.Unmarshal(payload, &req); err != nil {
@@ -142,10 +160,7 @@ func TestTemplateSpanAttributes(t *testing.T) {
 				SpanKind: "client",
 				Signals:  []string{"spans"},
 			}
-			payload, err := buildPayload(cfg, svc, signalSpans)
-			if err != nil {
-				t.Fatalf("buildPayload: %v", err)
-			}
+			payload := payloadFor(t, cfg, svc, signalSpans)
 			var req collectortracepb.ExportTraceServiceRequest
 			if err := proto.Unmarshal(payload, &req); err != nil {
 				t.Fatalf("unmarshal: %v", err)
@@ -175,10 +190,7 @@ func TestTemplateSpanAttributes(t *testing.T) {
 }
 
 func TestIstioSemanticsAddWorkloadContext(t *testing.T) {
-	payload, err := buildPayload(Config{}, Service{Name: "checkout", MeshSemantics: true, Signals: []string{"spans"}}, signalSpans)
-	if err != nil {
-		t.Fatalf("buildPayload: %v", err)
-	}
+	payload := payloadFor(t, Config{}, Service{Name: "checkout", Mesh: true}, signalSpans)
 	var req collectortracepb.ExportTraceServiceRequest
 	if err := proto.Unmarshal(payload, &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -197,10 +209,7 @@ func TestIstioSemanticsAddWorkloadContext(t *testing.T) {
 }
 
 func TestIstioMetricsAddStandardMeshMetrics(t *testing.T) {
-	payload, err := buildPayload(Config{}, Service{Name: "checkout", MeshMetrics: true, Signals: []string{"metrics"}}, signalMetrics)
-	if err != nil {
-		t.Fatalf("buildPayload: %v", err)
-	}
+	payload := payloadFor(t, Config{}, Service{Name: "checkout", Mesh: true}, signalMetrics)
 	var req collectormetricspb.ExportMetricsServiceRequest
 	if err := proto.Unmarshal(payload, &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)

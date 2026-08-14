@@ -3,101 +3,14 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	mathrand "math/rand/v2"
 	"strings"
 	"time"
 
-	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
-	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
-	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
-	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
-	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
-	"google.golang.org/protobuf/proto"
 )
-
-func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
-	now := time.Now()
-	resource := &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)}
-	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
-
-	switch kind {
-	case signalSpans:
-		traceID := randomBytes(16)
-		rootID := randomBytes(8)
-		failed := mathrand.IntN(100) < svc.FailureRate
-		rootDur := randomRootDuration()
-		rootEnd := now.Add(rootDur)
-		root := newSpan(svc, traceID, rootID, now, rootEnd, failed)
-
-		spans := []*tracepb.Span{root}
-		offset := 5 * time.Millisecond
-		for i := 0; i < svc.ChildSpans; i++ {
-			childID := randomBytes(8)
-			childDur := randomChildDuration()
-			childStart := now.Add(offset)
-			childEnd := childStart.Add(childDur)
-			if childEnd.After(rootEnd) {
-				childEnd = rootEnd
-			}
-			spans = append(spans, newChildSpan(svc.Name, traceID, childID, rootID, childStart, childEnd, i, failed))
-			offset += childDur + 2*time.Millisecond
-		}
-
-		return proto.Marshal(&collectortracepb.ExportTraceServiceRequest{
-			ResourceSpans: []*tracepb.ResourceSpans{{
-				Resource:   resource,
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: spans}},
-			}},
-		})
-	case signalMetrics:
-		failed := mathrand.IntN(100) < svc.FailureRate
-		metrics := []*metricspb.Metric{{
-			Name: svc.Name + ".requests.total",
-			Unit: "1",
-			Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
-				AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
-				IsMonotonic:            true,
-				DataPoints: []*metricspb.NumberDataPoint{{
-					TimeUnixNano: uint64(now.UnixNano()),
-					Value:        &metricspb.NumberDataPoint_AsInt{AsInt: int64(now.UnixNano()%7 + 1)},
-				}},
-			}},
-		}}
-		if svc.MeshMetrics {
-			metrics = append(metrics, istioMetrics(svc, now, failed)...)
-		}
-		return proto.Marshal(&collectormetricspb.ExportMetricsServiceRequest{
-			ResourceMetrics: []*metricspb.ResourceMetrics{{
-				Resource: resource,
-				ScopeMetrics: []*metricspb.ScopeMetrics{{
-					Scope:   scope,
-					Metrics: metrics,
-				}},
-			}},
-		})
-	case signalLogs:
-		return proto.Marshal(&collectorlogspb.ExportLogsServiceRequest{
-			ResourceLogs: []*logspb.ResourceLogs{{
-				Resource: resource,
-				ScopeLogs: []*logspb.ScopeLogs{{
-					Scope: scope,
-					LogRecords: []*logspb.LogRecord{{
-						TimeUnixNano:   uint64(now.UnixNano()),
-						SeverityNumber: logspb.SeverityNumber_SEVERITY_NUMBER_INFO,
-						SeverityText:   "INFO",
-						Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc.Name + " synthetic log"}},
-					}},
-				}},
-			}},
-		})
-	default:
-		return nil, fmt.Errorf("unsupported signal type: %s", kind)
-	}
-}
 
 // svcAttributes builds the resource attribute list for a service.
 // Precedence (high → low): service.name > svc.Attributes > infraDefaults > cfg.Attributes (global).
@@ -105,7 +18,7 @@ func svcAttributes(cfg Config, svc Service) []*commonpb.KeyValue {
 	merged := make(map[string]AttrValue, len(cfg.Attributes)+len(svc.Attributes)+8)
 	mergeAttrs(merged, cfg.Attributes)
 	mergeAttrs(merged, infraDefaults(svc))
-	if svc.MeshSemantics {
+	if svc.Mesh {
 		mergeAttrs(merged, istioResourceAttrs(svc))
 	}
 	mergeAttrs(merged, svc.Attributes)
@@ -437,7 +350,7 @@ func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed b
 		EndTimeUnixNano:   uint64(end.UnixNano()),
 	}
 	applyFailure(span, failed)
-	if svc.MeshSemantics {
+	if svc.Mesh {
 		tmplAttrs = append(tmplAttrs, istioSpanAttrs(svc)...)
 	}
 	tmplAttrs = applySpanAttrOverrides(tmplAttrs, svc.SpanAttrs)

@@ -67,8 +67,8 @@ func TestNewServiceOpensSettings(t *testing.T) {
 	if m.screen != screenServiceEdit || m.tabActive || m.form == nil {
 		t.Fatalf("new service did not open the Settings form: screen=%v tabActive=%v form=%v", m.screen, m.tabActive, m.form != nil)
 	}
-	if m.fName != "" {
-		t.Fatalf("new service name = %q, want blank", m.fName)
+	if m.fName != defaultServiceNamePrefix {
+		t.Fatalf("new service name = %q, want %q", m.fName, defaultServiceNamePrefix)
 	}
 }
 
@@ -84,6 +84,23 @@ func TestSettingsSummaryLeavesEnabledToOverview(t *testing.T) {
 	m := testTUI(t)
 	if got := m.serviceTabSummaries()[0]; strings.Contains(got, "enabled") || strings.Contains(got, "disabled") {
 		t.Fatalf("Settings summary duplicates overview toggle: %q", got)
+	}
+}
+
+func TestServiceFormKeepsMeshDescriptionReadable(t *testing.T) {
+	m := testTUI(t)
+	m.loadServiceFields(0)
+	m.width, m.height, m.screen = 80, 24, screenServiceEdit
+	m.form = m.makeServiceTabForm(tabService)
+	m.form.Init()
+	view := stripANSI(m.form.View())
+	for _, want := range []string{"Istio mesh", "span semantics + mesh metrics"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("service form missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "meshspan") {
+		t.Fatalf("mesh label and description run together:\n%s", view)
 	}
 }
 
@@ -150,8 +167,8 @@ func TestTemplateSelectsRenderEveryOption(t *testing.T) {
 		lastOpt  string
 		firstOpt string
 	}{
-		{2, "gRPC", "None (generic)"},
-		{3, "PaaS · Cloud Foundry / Tanzu", "Kubernetes · vanilla"},
+		{tabSpans, "gRPC", "None (generic)"},
+		{tabInfrastructure, "PaaS · Cloud Foundry / Tanzu", "Kubernetes · vanilla"},
 	}
 
 	m := testTUI(t)
@@ -215,6 +232,67 @@ func TestCtrlRMovesToNextTab(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
 	if m.editTab != 1 {
 		t.Fatalf("ctrl+r moved to tab %d, want 1", m.editTab)
+	}
+}
+
+func TestNumericNavigationReachesAllTabs(t *testing.T) {
+	m := testTUI(t)
+	m.loadServiceFields(0)
+	m.screen, m.tabActive = screenServiceEdit, true
+	for i := range serviceTabNames {
+		key := string(rune('1' + i))
+		m.updateServiceSelector(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if m.editTab != i || m.form == nil {
+			t.Fatalf("key %q selected tab %d, want %d", key, m.editTab, i)
+		}
+		m.tabActive = true
+	}
+}
+
+func TestCallsAndMetricsLogsRoundTrip(t *testing.T) {
+	m := testTUI(t)
+	m.loadServiceFields(0)
+	m.fDownstream = "payment-svc\n inventory-svc\n"
+	m.fMetricType = "histogram"
+	m.fMetricName = "latency"
+	m.fMetricUnit = "ms"
+	m.fLogSeverity = "warn"
+	svc := m.buildServiceFromFields()
+	if len(svc.DownstreamCalls) != 2 || svc.DownstreamCalls[0] != "payment-svc" {
+		t.Fatalf("downstream calls = %+v", svc.DownstreamCalls)
+	}
+	if svc.Metric == nil || svc.Metric.Type != "histogram" || svc.Metric.Name != "latency" || svc.Metric.Unit != "ms" {
+		t.Fatalf("metric config = %+v", svc.Metric)
+	}
+	if svc.LogSeverity != "warn" {
+		t.Fatalf("log severity = %q", svc.LogSeverity)
+	}
+}
+
+func TestRenameUpdatesInboundCalls(t *testing.T) {
+	m := testTUI(t)
+	m.cfg.Services = append(m.cfg.Services, Service{Name: "caller", SpanKind: "server", Interval: 5, DownstreamCalls: []string{"svc"}})
+	m.loadServiceFields(0)
+	m.fName = "renamed"
+	m.screen, m.tabActive = screenServiceEdit, true
+	m.commitService()
+	if got := m.app.GetConfig().Services[1].DownstreamCalls[0]; got != "renamed" {
+		t.Fatalf("renamed call target = %q, want renamed", got)
+	}
+}
+
+func TestDeleteReferencedServiceIsBlocked(t *testing.T) {
+	m := testTUI(t)
+	m.cfg.Services = append(m.cfg.Services, Service{Name: "caller", SpanKind: "server", Interval: 5, DownstreamCalls: []string{"svc"}})
+	m.app.cfg = m.cfg
+	m.cursor = 0
+	m.fDeleteConfirmed = true
+	m.commitDelete()
+	if len(m.app.GetConfig().Services) != 2 {
+		t.Fatal("referenced service was deleted")
+	}
+	if !m.flashErr || !strings.Contains(m.flash, "referenced by caller") {
+		t.Fatalf("delete error = %q", m.flash)
 	}
 }
 

@@ -80,6 +80,7 @@ type tui struct {
 	fTemplate      string
 	fInfraCategory string // "" | "kubernetes" | "container" | "serverless" | "host" | "other"
 	fInfraTemplate string
+	fInfraStep     int // 0 = category select, 1 = template select
 	fSpanKind      string
 	fFailure       string
 	fInterval      string
@@ -224,6 +225,13 @@ func (m *tui) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 // leaveForm handles Esc / abort out of an open form.
 func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
 	if m.screen == screenServiceEdit {
+		// Infra step 1 (template): ESC walks back to step 0 (category).
+		if m.editTab == tabInfrastructure && m.fInfraStep == 1 {
+			m.fInfraStep = 0
+			m.form = m.makeServiceTabForm(tabInfrastructure)
+			return m, m.form.Init()
+		}
+		m.fInfraStep = 0
 		m.tabActive = true
 	} else {
 		m.screen = screenList
@@ -235,6 +243,23 @@ func (m *tui) leaveForm() (tea.Model, tea.Cmd) {
 func (m *tui) commitForm() (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenServiceEdit:
+		// Infrastructure tab is a two-step flow: category → template.
+		if m.editTab == tabInfrastructure && m.fInfraStep == 0 {
+			if m.fInfraCategory == "" {
+				// "None" chosen — no template step needed; clear and return.
+				m.fInfraTemplate = ""
+				m.fInfraStep = 0
+				m.tabActive = true
+				m.form = nil
+				return m, nil
+			}
+			// Advance to template selection.
+			m.fInfraStep = 1
+			m.form = m.makeServiceTabForm(tabInfrastructure)
+			return m, m.form.Init()
+		}
+		// All other tabs (and infra step 1): return to selector.
+		m.fInfraStep = 0
 		m.tabActive = true
 		m.form = nil
 		return m, nil
@@ -662,26 +687,35 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 		).WithWidth(w)
 
 	case tabInfrastructure:
+		// Two-step flow: category first, then the template within that category.
+		// Static Options() on both selects avoids huh v1's OptionsFunc viewport
+		// bug (YOffset pinned to selected on every Update → text scrolls, cursor
+		// stays put). commitForm() advances step 0→1; leaveForm() walks step 1→0.
+		if m.fInfraStep == 0 {
+			return huh.NewForm(
+				huh.NewGroup(
+					huh.NewSelect[string]().
+						Title("Infrastructure — category").
+						Description("Choose a deployment environment · enter to continue").
+						Options(
+							huh.NewOption("None", ""),
+							huh.NewOption("Kubernetes", "kubernetes"),
+							huh.NewOption("Container", "container"),
+							huh.NewOption("Serverless", "serverless"),
+							huh.NewOption("Host", "host"),
+							huh.NewOption("Other", "other"),
+						).
+						Value(&m.fInfraCategory),
+				),
+			).WithWidth(w)
+		}
+		// step 1 — template within the chosen category
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
-					Title("Category").
-					Description("Deployment environment type").
-					Options(
-						huh.NewOption("None", ""),
-						huh.NewOption("Kubernetes", "kubernetes"),
-						huh.NewOption("Container", "container"),
-						huh.NewOption("Serverless", "serverless"),
-						huh.NewOption("Host", "host"),
-						huh.NewOption("Other", "other"),
-					).
-					Value(&m.fInfraCategory),
-				huh.NewSelect[string]().
-					Title("Template").
-					Description("Specific environment variant · / to filter").
-					OptionsFunc(func() []huh.Option[string] {
-						return infraTemplatesForCategory(m.fInfraCategory)
-					}, &m.fInfraCategory).
+					Title("Infrastructure — template").
+					Description("Specific environment variant · / to filter · esc back to category").
+					Options(infraTemplatesForCategory(m.fInfraCategory)...).
 					Value(&m.fInfraTemplate),
 			),
 		).WithWidth(w)
@@ -726,6 +760,16 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 // settingsLabel pads inline field titles so the values line up.
 func settingsLabel(s string) string {
 	return fmt.Sprintf("%-22s", s)
+}
+
+// resetInfraStepIfNeeded resets the infrastructure two-step flow to step 0
+// and re-derives fInfraCategory from the actual saved template whenever the
+// infra tab is opened from the tab selector, so stale UI state is discarded.
+func (m *tui) resetInfraStepIfNeeded() {
+	if m.editTab == tabInfrastructure {
+		m.fInfraStep = 0
+		m.fInfraCategory = infraCategoryOf[m.fInfraTemplate]
+	}
 }
 
 func (m *tui) commitService() (tea.Model, tea.Cmd) {
@@ -806,11 +850,13 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case "1", "2", "3", "4", "5", "6", "7":
 		m.editTab = int(k.Runes[0] - '1')
+		m.resetInfraStepIfNeeded()
 		m.tabActive = false
 		m.form = m.makeServiceTabForm(m.editTab)
 		return m, m.form.Init()
 
 	case "enter", " ":
+		m.resetInfraStepIfNeeded()
 		m.tabActive = false
 		m.form = m.makeServiceTabForm(m.editTab)
 		return m, m.form.Init()

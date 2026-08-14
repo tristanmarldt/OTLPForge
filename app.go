@@ -32,14 +32,20 @@ func NewApp(configPath string, httpTimeout time.Duration) *App {
 }
 
 func (a *App) SetConfig(cfg Config) error {
+	cfg = normalizeConfig(cfg)
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
 	a.mu.Lock()
-	a.cfg = cfg
 	running := a.status.Running
 	a.mu.Unlock()
 
 	if err := a.saveConfig(cfg); err != nil {
 		return err
 	}
+	a.mu.Lock()
+	a.cfg = cfg
+	a.mu.Unlock()
 	if !running {
 		return nil
 	}
@@ -104,11 +110,27 @@ func (a *App) sendService(svc Service) {
 	a.mu.RLock()
 	cfg := a.cfg.runtimeConfig()
 	a.mu.RUnlock()
+	if current, ok := indexServices(cfg)[svc.Name]; ok {
+		svc = current
+	}
+	payloads, buildErr := buildEmissionPayloads(cfg, svc)
 	for _, kind := range []signalKind{signalSpans, signalMetrics, signalLogs} {
 		if !svc.hasSignal(kind) {
 			continue
 		}
-		payload, err := buildPayload(cfg, svc, kind)
+		var payload []byte
+		switch kind {
+		case signalSpans:
+			payload = payloads.Traces
+		case signalMetrics:
+			payload = payloads.Metrics
+		case signalLogs:
+			payload = payloads.Logs
+		}
+		err := buildErr
+		if err == nil && len(payload) == 0 {
+			err = fmt.Errorf("no payload generated for %s", kind)
+		}
 		if err == nil {
 			err = a.postOTLP(cfg.Endpoint, cfg.Token, kind, payload)
 		}
@@ -186,11 +208,13 @@ func (a *App) TestConnection() error {
 		return fmt.Errorf("endpoint is required")
 	}
 	svc := normalizeService(Service{Name: "otgen-connection-test", SpanKind: "internal"})
-	payload, err := buildPayload(cfg, svc, signalSpans)
+	testCfg := cfg
+	testCfg.Services = []Service{svc}
+	payloads, err := buildEmissionPayloads(testCfg, svc)
 	if err != nil {
 		return err
 	}
-	return a.postOTLP(cfg.Endpoint, cfg.Token, signalSpans, payload)
+	return a.postOTLP(cfg.Endpoint, cfg.Token, signalSpans, payloads.Traces)
 }
 
 // GetConfig returns a snapshot of the current config (safe to call from any goroutine).

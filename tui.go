@@ -59,7 +59,17 @@ const (
 	screenHelp
 )
 
-var serviceTabNames = []string{"Settings", "Signals", "Span template", "Infra template", "Resource attrs", "Span attrs"}
+const (
+	tabService = iota
+	tabSpans
+	tabCalls
+	tabMetricsLogs
+	tabInfrastructure
+	tabResourceAttrs
+	tabSpanAttrs
+)
+
+var serviceTabNames = []string{"Service", "Spans", "Calls", "Metrics & logs", "Infrastructure", "Resource attrs", "Span attrs"}
 
 // ── model ─────────────────────────────────────────────────────────────────────
 
@@ -92,6 +102,12 @@ type tui struct {
 	fInterval      string
 	fChildSpans    string
 	fSignals       []string
+	fDownstream    string
+	fMetricType    string
+	fMetricName    string
+	fMetricUnit    string
+	fLogSeverity   string
+	fMesh          bool
 	fEnabled       bool
 	fAttrs         string
 	fSpanAttrs     string
@@ -321,7 +337,7 @@ func (m *tui) updateList(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *tui) loadServiceFields(idx int) {
 	m.editIdx = idx
 	if idx == -1 {
-		m.fName = ""
+		m.fName = defaultServiceNamePrefix
 		m.fTemplate = ""
 		m.fInfraTemplate = ""
 		m.fSpanKind = "server"
@@ -329,6 +345,12 @@ func (m *tui) loadServiceFields(idx int) {
 		m.fInterval = "5"
 		m.fChildSpans = "0"
 		m.fSignals = []string{"logs", "metrics", "spans"}
+		m.fDownstream = ""
+		m.fMetricType = "sum"
+		m.fMetricName = ""
+		m.fMetricUnit = ""
+		m.fLogSeverity = "info"
+		m.fMesh = false
 		m.fEnabled = true
 		m.fAttrs = ""
 		m.fSpanAttrs = ""
@@ -347,6 +369,17 @@ func (m *tui) loadServiceFields(idx int) {
 			m.fSignals = append([]string(nil), svc.Signals...)
 			sort.Strings(m.fSignals)
 		}
+		m.fDownstream = callsToText(svc.DownstreamCalls)
+		effectiveMetric := effectiveMetricConfig(svc)
+		m.fMetricType = effectiveMetric.Type
+		m.fMetricName = ""
+		m.fMetricUnit = ""
+		if svc.Metric != nil {
+			m.fMetricName = svc.Metric.Name
+			m.fMetricUnit = svc.Metric.Unit
+		}
+		m.fLogSeverity = effectiveLogSeverity(svc)
+		m.fMesh = svc.Mesh
 		m.fEnabled = svc.Enabled
 
 		m.fAttrs = attrsToText(svc.Attributes)
@@ -366,19 +399,36 @@ func (m *tui) buildServiceFromFields() Service {
 	if len(signals) == 3 {
 		signals = nil // all three = store empty (= all enabled)
 	}
+	metricConfig := MetricConfig{
+		Type: strings.TrimSpace(m.fMetricType),
+		Name: strings.TrimSpace(m.fMetricName),
+		Unit: strings.TrimSpace(m.fMetricUnit),
+	}
+	var metric *MetricConfig
+	if !(metricConfig.Type == "sum" && metricConfig.Name == "" && metricConfig.Unit == "") {
+		metric = &metricConfig
+	}
+	severity := strings.TrimSpace(m.fLogSeverity)
+	if severity == "info" {
+		severity = ""
+	}
 
 	return normalizeService(Service{
-		Name:          strings.TrimSpace(m.fName),
-		Template:      m.fTemplate,
-		InfraTemplate: m.fInfraTemplate,
-		SpanKind:      m.fSpanKind,
-		FailureRate:   failRate,
-		Interval:      interval,
-		ChildSpans:    childSpans,
-		Signals:       signals,
-		Enabled:       m.fEnabled,
-		Attributes:    parseAttrs(m.fAttrs),
-		SpanAttrs:     parseAttrs(m.fSpanAttrs),
+		Name:            strings.TrimSpace(m.fName),
+		Template:        m.fTemplate,
+		InfraTemplate:   m.fInfraTemplate,
+		SpanKind:        m.fSpanKind,
+		FailureRate:     failRate,
+		Interval:        interval,
+		ChildSpans:      childSpans,
+		Signals:         signals,
+		DownstreamCalls: parseCalls(m.fDownstream),
+		Metric:          metric,
+		LogSeverity:     severity,
+		Mesh:            m.fMesh,
+		Enabled:         m.fEnabled,
+		Attributes:      parseAttrs(m.fAttrs),
+		SpanAttrs:       parseAttrs(m.fSpanAttrs),
 	})
 }
 
@@ -390,11 +440,16 @@ func (m *tui) hasUnsavedChanges() bool {
 // ── service editor: forms ─────────────────────────────────────────────────────
 
 const attrTypeHint = "key=value · bool/number auto-detected · quote strings"
+const defaultServiceNamePrefix = "otgen-"
 
 func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	w := m.formWidth()
+	metricPreview := effectiveMetricConfig(Service{
+		Name:   strings.TrimSpace(m.fName),
+		Metric: &MetricConfig{Type: m.fMetricType, Name: m.fMetricName, Unit: m.fMetricUnit},
+	})
 	switch tabIdx {
-	case 0: // Settings
+	case tabService:
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
@@ -429,51 +484,25 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						}
 						return nil
 					}),
-				huh.NewInput().
-					Title(settingsLabel("Child spans")).
-					Inline(true).
-					Value(&m.fChildSpans).
-					Validate(func(s string) error {
-						n, err := strconv.Atoi(strings.TrimSpace(s))
-						if err != nil || n < 0 || n > 10 {
-							return fmt.Errorf("must be 0–10")
-						}
-						return nil
-					}),
-				huh.NewSelect[string]().
-					Title(settingsLabel("Span kind")).
-					Inline(true).
-					Options(
-						huh.NewOption("server", "server"),
-						huh.NewOption("client", "client"),
-						huh.NewOption("internal", "internal"),
-						huh.NewOption("producer", "producer"),
-						huh.NewOption("consumer", "consumer"),
-					).
-					Description("←/→ change").
-					Value(&m.fSpanKind),
-			),
-		).WithWidth(w)
-
-	case 1: // Signals
-		return huh.NewForm(
-			huh.NewGroup(
 				huh.NewMultiSelect[string]().
-					Title("Signals").
+					Title(settingsLabel("Signals")).
 					Options(
 						huh.NewOption("spans", "spans"),
 						huh.NewOption("metrics", "metrics"),
 						huh.NewOption("logs", "logs"),
 					).
 					Value(&m.fSignals),
+				huh.NewConfirm().
+					Title(settingsLabel("Istio mesh")).
+					Inline(true).
+					Affirmative("on").
+					Negative("off").
+					Description("span semantics + mesh metrics").
+					Value(&m.fMesh),
 			),
 		).WithWidth(w)
 
-	case 2: // Span template
-		// No .Height() here: huh v1.0.0 pins viewport.YOffset to the selected
-		// index on every Update when a height is set, so the list scrolls under
-		// a stationary cursor. Each select gets its own tab instead, short
-		// enough to render whole.
+	case tabSpans:
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
@@ -488,10 +517,82 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 						huh.NewOption("gRPC", "grpc"),
 					).
 					Value(&m.fTemplate),
+				huh.NewSelect[string]().
+					Title(settingsLabel("Span kind")).
+					Inline(true).
+					Options(
+						huh.NewOption("server", "server"),
+						huh.NewOption("client", "client"),
+						huh.NewOption("internal", "internal"),
+						huh.NewOption("producer", "producer"),
+						huh.NewOption("consumer", "consumer"),
+					).
+					Description("←/→ change").
+					Value(&m.fSpanKind),
+				huh.NewInput().
+					Title(settingsLabel("Local child spans")).
+					Inline(true).
+					Value(&m.fChildSpans).
+					Validate(func(s string) error {
+						n, err := strconv.Atoi(strings.TrimSpace(s))
+						if err != nil || n < 0 || n > 10 {
+							return fmt.Errorf("must be 0–10")
+						}
+						return nil
+					}),
 			),
 		).WithWidth(w)
 
-	case 3: // Infrastructure template
+	case tabCalls:
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewText().
+					Title("Downstream calls").
+					Description("Example shown when empty · one service per line · cycles rejected").
+					Placeholder("payment-svc\nledger-svc").
+					Lines(m.textLines()).
+					Value(&m.fDownstream),
+			),
+		).WithWidth(w)
+
+	case tabMetricsLogs:
+		return huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title(settingsLabel("Metric type")).
+					Inline(true).
+					Options(
+						huh.NewOption("Sum", "sum"),
+						huh.NewOption("Gauge", "gauge"),
+						huh.NewOption("Histogram", "histogram"),
+					).
+					Description("Used when metrics are enabled").
+					Value(&m.fMetricType),
+				huh.NewInput().
+					Title(settingsLabel("Metric name")).
+					Inline(true).
+					Placeholder(metricPreview.Name).
+					Value(&m.fMetricName),
+				huh.NewInput().
+					Title(settingsLabel("Metric unit")).
+					Inline(true).
+					Placeholder(metricPreview.Unit).
+					Value(&m.fMetricUnit),
+				huh.NewSelect[string]().
+					Title(settingsLabel("Log severity")).
+					Inline(true).
+					Options(
+						huh.NewOption("DEBUG", "debug"),
+						huh.NewOption("INFO", "info"),
+						huh.NewOption("WARN", "warn"),
+						huh.NewOption("ERROR", "error"),
+					).
+					Description("Used when logs are enabled").
+					Value(&m.fLogSeverity),
+			),
+		).WithWidth(w)
+
+	case tabInfrastructure:
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
@@ -520,7 +621,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	case 4: // Resource attrs
+	case tabResourceAttrs:
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewText().
@@ -531,7 +632,7 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 			),
 		).WithWidth(w)
 
-	default: // 5 — Span attrs
+	default: // tabSpanAttrs
 		return huh.NewForm(
 			huh.NewGroup(
 				huh.NewText().
@@ -544,9 +645,9 @@ func (m *tui) makeServiceTabForm(tabIdx int) *huh.Form {
 	}
 }
 
-// settingsLabel pads a Settings-tab title so the inline values line up.
+// settingsLabel pads inline field titles so the values line up.
 func settingsLabel(s string) string {
-	return fmt.Sprintf("%-16s", s)
+	return fmt.Sprintf("%-22s", s)
 }
 
 func (m *tui) commitService() (tea.Model, tea.Cmd) {
@@ -554,6 +655,10 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 
 	cfg := m.cfg
 	services := append([]Service(nil), cfg.Services...)
+	oldName := ""
+	if m.editIdx >= 0 && m.editIdx < len(services) {
+		oldName = services[m.editIdx].Name
+	}
 	if m.editIdx == -1 {
 		services = append(services, svc)
 		m.editIdx = len(services) - 1
@@ -561,6 +666,9 @@ func (m *tui) commitService() (tea.Model, tea.Cmd) {
 		services[m.editIdx] = svc
 	}
 	cfg.Services = services
+	if oldName != "" && oldName != svc.Name {
+		renameServiceReferences(&cfg, oldName, svc.Name)
+	}
 	cfg = normalizeConfig(cfg)
 	if err := validateConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
@@ -615,7 +723,7 @@ func (m *tui) updateServiceSelector(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTab++
 		}
 
-	case "1", "2", "3", "4", "5", "6":
+	case "1", "2", "3", "4", "5", "6", "7":
 		m.editTab = int(k.Runes[0] - '1')
 		m.tabActive = false
 		m.form = m.makeServiceTabForm(m.editTab)
@@ -674,7 +782,7 @@ func (m *tui) commitGlobal() (tea.Model, tea.Cmd) {
 	if err := m.app.SetConfig(cfg); err != nil {
 		m.setFlash("error: "+err.Error(), true)
 	} else {
-		m.cfg = cfg
+		m.cfg = m.app.GetConfig()
 		m.setFlash("settings saved", false)
 	}
 	m.screen = screenList
@@ -713,6 +821,10 @@ func (m *tui) commitDelete() (tea.Model, tea.Cmd) {
 	cfg := m.cfg
 	if m.cursor < len(cfg.Services) {
 		name := cfg.Services[m.cursor].Name
+		if referrers := serviceReferrers(cfg, name); len(referrers) > 0 {
+			m.setFlash(fmt.Sprintf("cannot delete %s; referenced by %s", name, strings.Join(referrers, ", ")), true)
+			return m, nil
+		}
 		services := append([]Service(nil), cfg.Services...)
 		services = append(services[:m.cursor], services[m.cursor+1:]...)
 		cfg.Services = services
@@ -910,7 +1022,7 @@ func (m *tui) serviceSelectorView() string {
 	}
 
 	rows = append(rows, "", "  "+m.sepLine())
-	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-6 open  ·  s save  ·  esc back"))
+	rows = append(rows, sHelp.Render("  ↑↓ navigate  ·  enter / 1-7 open  ·  s save  ·  esc back"))
 	rows = append(rows, sHelp.Render("  ~ inherited from template   ✎ your override"))
 	return strings.Join(rows, "\n")
 }
@@ -925,24 +1037,41 @@ func (m *tui) serviceTabSummaries() []string {
 	} else if len(m.fSignals) == 0 {
 		sigs = "no signals"
 	}
-	settings := fmt.Sprintf("%s · every %ss · %s%% err",
-		m.fSpanKind, strings.TrimSpace(m.fInterval), strings.TrimSpace(m.fFailure))
+	service := fmt.Sprintf("every %ss · %s%% err · %s",
+		strings.TrimSpace(m.fInterval), strings.TrimSpace(m.fFailure), sigs)
+	if m.fMesh {
+		service += " · istio mesh"
+	}
+	spans := m.fTemplate
+	if spans == "" {
+		spans = sMuted.Render("none — generic spans")
+	}
+	spans += " · " + m.fSpanKind
 	if n, _ := strconv.Atoi(strings.TrimSpace(m.fChildSpans)); n > 0 {
-		settings += fmt.Sprintf(" · +%d child", n)
+		spans += fmt.Sprintf(" · +%d local child", n)
 	}
-	spanTmpl := m.fTemplate
-	if spanTmpl == "" {
-		spanTmpl = sMuted.Render("none — generic spans")
+	calls := "none"
+	if parsed := parseCalls(m.fDownstream); len(parsed) > 0 {
+		names := make([]string, 0, len(parsed))
+		for _, call := range parsed {
+			names = append(names, call)
+		}
+		calls = truncate(strings.Join(names, ", "), max(12, m.width-32))
 	}
+	metric := effectiveMetricConfig(Service{Name: strings.TrimSpace(m.fName), Metric: &MetricConfig{
+		Type: m.fMetricType, Name: m.fMetricName, Unit: m.fMetricUnit,
+	}})
+	metricsLogs := fmt.Sprintf("%s %s · %s logs", metric.Type, metric.Name, strings.ToUpper(effectiveLogSeverity(Service{LogSeverity: m.fLogSeverity})))
 	infraTmpl := m.fInfraTemplate
 	if infraTmpl == "" {
 		infraTmpl = sMuted.Render("none")
 	}
 
 	return []string{
-		settings,
-		sigs,
-		spanTmpl,
+		service,
+		spans,
+		calls,
+		metricsLogs,
 		infraTmpl,
 		attrSummary(m.fAttrs, len(infraDefaults(Service{Name: strings.TrimSpace(m.fName), InfraTemplate: m.fInfraTemplate}))),
 		attrSummary(m.fSpanAttrs, len(templateDefaults(m.fTemplate))),
@@ -971,9 +1100,9 @@ func (m *tui) helpView() string {
 		sHelp.Render("    r run · t test · g config · q quit"),
 		"",
 		"  " + sBold.Render("Editor"),
-		sHelp.Render("    enter/1-6 open · s save · esc back"),
-		sHelp.Render("    ctrl+r next tab · x toggle signal"),
-		sHelp.Render("    / filter templates · alt+enter new line"),
+		sHelp.Render("    enter/1-7 open · s save · esc back"),
+		sHelp.Render("    ctrl+r next tab · / filter templates"),
+		sHelp.Render("    alt+enter new line in text fields"),
 		"",
 		"  " + sBold.Render("Attributes"),
 		sHelp.Render("    ~ inherited · ✎ service override"),
@@ -1082,7 +1211,7 @@ func (m *tui) renderService(svc Service, expanded bool) string {
 	}
 	meta = append(meta, fmt.Sprintf("%ds", svc.Interval), fmt.Sprintf("%d%% err", svc.FailureRate))
 	if svc.ChildSpans > 0 {
-		meta = append(meta, fmt.Sprintf("+%d child", svc.ChildSpans))
+		meta = append(meta, fmt.Sprintf("+%d local child", svc.ChildSpans))
 	}
 	row1 := cursor + dot + " " + name + "  " + sMuted.Render(strings.Join(meta, "  "))
 
@@ -1248,6 +1377,26 @@ func attrValueText(v AttrValue, quote bool) string {
 		}
 		return v.Str
 	}
+}
+
+func callsToText(calls []string) string {
+	lines := make([]string, 0, len(calls))
+	for _, call := range calls {
+		if name := strings.TrimSpace(call); name != "" {
+			lines = append(lines, name)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parseCalls(text string) []string {
+	var calls []string
+	for _, line := range strings.Split(text, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			calls = append(calls, name)
+		}
+	}
+	return calls
 }
 
 // attrsToText serialises a map[string]AttrValue to a human-editable

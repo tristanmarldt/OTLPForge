@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -89,17 +90,27 @@ func doubleAttrVal(v float64) AttrValue { return AttrValue{Type: "double", Doubl
 
 // Service defines a named synthetic service to emit OTLP signals for.
 type Service struct {
-	Name          string               `json:"name"`
-	Template      string               `json:"template,omitempty"`      // span semantics: "", "http-server", "http-client", "db", "messaging", "grpc"
-	InfraTemplate string               `json:"infraTemplate,omitempty"` // infra context: "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process"
-	SpanKind      string               `json:"spanKind"`                // server|client|internal|producer|consumer
-	FailureRate   int                  `json:"failureRate"`             // 0–100 %
-	Interval      int                  `json:"interval"`                // seconds between sends, minimum 1
-	ChildSpans    int                  `json:"childSpans"`              // additional client spans under the root, 0–10
-	Signals       []string             `json:"signals"`                 // "spans","metrics","logs"; empty = all three
-	Attributes    map[string]AttrValue `json:"attributes"`              // resource-level; service.name always wins
-	SpanAttrs     map[string]AttrValue `json:"spanAttrs,omitempty"`     // span-level overrides for template-generated attributes
-	Enabled       bool                 `json:"enabled"`
+	Name            string               `json:"name"`
+	Template        string               `json:"template,omitempty"`      // span semantics: "", "http-server", "http-client", "db", "messaging", "grpc"
+	InfraTemplate   string               `json:"infraTemplate,omitempty"` // infra context: "", "k8s", "eks", "gke", "aks", "ecs", "host", "docker", "lambda", "cloudfoundry", "process"
+	SpanKind        string               `json:"spanKind"`                // server|client|internal|producer|consumer
+	FailureRate     int                  `json:"failureRate"`             // 0–100 %
+	Interval        int                  `json:"interval"`                // seconds between sends, minimum 1
+	ChildSpans      int                  `json:"childSpans"`              // additional client spans under the root, 0–10
+	Signals         []string             `json:"signals"`                 // "spans","metrics","logs"; empty = all three
+	Attributes      map[string]AttrValue `json:"attributes"`              // resource-level; service.name always wins
+	SpanAttrs       map[string]AttrValue `json:"spanAttrs,omitempty"`     // span-level overrides for template-generated attributes
+	Mesh            bool                 `json:"mesh,omitempty"`
+	DownstreamCalls []string             `json:"downstreamCalls,omitempty"`
+	Metric          *MetricConfig        `json:"metric,omitempty"`
+	LogSeverity     string               `json:"logSeverity,omitempty"`
+	Enabled         bool                 `json:"enabled"`
+}
+
+type MetricConfig struct {
+	Type string `json:"type,omitempty"`
+	Name string `json:"name,omitempty"`
+	Unit string `json:"unit,omitempty"`
 }
 
 // Config is the full application configuration schema.
@@ -177,12 +188,7 @@ func defaultConfig() Config {
 			Interval:    5,
 			ChildSpans:  0,
 			Signals:     []string{"spans", "metrics", "logs"},
-			Attributes: map[string]AttrValue{
-				"env":                 strAttrVal("dev"),
-				"dt.cost.costcenter":  strAttrVal("test-cost-center"),
-				"dt.security_context": strAttrVal("test-sec-ctxt"),
-			},
-			Enabled: true,
+			Enabled:     true,
 		}},
 	}
 }
@@ -226,6 +232,18 @@ func normalizeService(svc Service) Service {
 	if svc.SpanAttrs == nil {
 		svc.SpanAttrs = map[string]AttrValue{}
 	}
+	if len(svc.DownstreamCalls) > 0 {
+		svc.DownstreamCalls = append([]string(nil), svc.DownstreamCalls...)
+	}
+	for i := range svc.DownstreamCalls {
+		svc.DownstreamCalls[i] = strings.TrimSpace(svc.DownstreamCalls[i])
+	}
+	if svc.Metric != nil {
+		metric := *svc.Metric
+		metric.Type = strings.ToLower(strings.TrimSpace(metric.Type))
+		svc.Metric = &metric
+	}
+	svc.LogSeverity = strings.ToLower(strings.TrimSpace(svc.LogSeverity))
 	return svc
 }
 
@@ -240,6 +258,7 @@ func normalizeConfig(cfg Config) Config {
 }
 
 func validateConfig(cfg Config) error {
+	cfg = normalizeConfig(cfg)
 	if len(cfg.Services) == 0 {
 		return errors.New("at least one service is required")
 	}
@@ -264,8 +283,148 @@ func validateConfig(cfg Config) error {
 				return fmt.Errorf("services[%d].signals[%d]: must be one of: spans, metrics, logs", i, j)
 			}
 		}
+		if svc.Metric != nil && svc.Metric.Type != "" {
+			switch svc.Metric.Type {
+			case "sum", "gauge", "histogram":
+			default:
+				return fmt.Errorf("services[%d].metric.type: must be one of: sum, gauge, histogram", i)
+			}
+		}
+		if svc.LogSeverity != "" {
+			switch svc.LogSeverity {
+			case "debug", "info", "warn", "error":
+			default:
+				return fmt.Errorf("services[%d].log.severity: must be one of: debug, info, warn, error", i)
+			}
+		}
+	}
+	indices := indexServices(cfg)
+	for i, svc := range cfg.Services {
+		seenTargets := make(map[string]struct{}, len(svc.DownstreamCalls))
+		for j, target := range svc.DownstreamCalls {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				return fmt.Errorf("services[%d].downstreamCalls[%d]: service is required", i, j)
+			}
+			if target == svc.Name {
+				return fmt.Errorf("services[%d].downstreamCalls[%d]: service cannot call itself", i, j)
+			}
+			if _, ok := indices[target]; !ok {
+				return fmt.Errorf("services[%d].downstreamCalls[%d]: unknown service %q", i, j, target)
+			}
+			if _, dup := seenTargets[target]; dup {
+				return fmt.Errorf("services[%d].downstreamCalls[%d]: duplicate target %q", i, j, target)
+			}
+			seenTargets[target] = struct{}{}
+		}
+	}
+	if cycle := serviceCallCycle(cfg); len(cycle) > 0 {
+		return fmt.Errorf("service call cycle: %s", strings.Join(cycle, " -> "))
 	}
 	return nil
+}
+
+func indexServices(cfg Config) map[string]Service {
+	indexed := make(map[string]Service, len(cfg.Services))
+	for _, svc := range cfg.Services {
+		indexed[svc.Name] = svc
+	}
+	return indexed
+}
+
+func renameServiceReferences(cfg *Config, oldName, newName string) {
+	for i := range cfg.Services {
+		for j := range cfg.Services[i].DownstreamCalls {
+			if cfg.Services[i].DownstreamCalls[j] == oldName {
+				cfg.Services[i].DownstreamCalls[j] = newName
+			}
+		}
+	}
+}
+
+func serviceReferrers(cfg Config, target string) []string {
+	var names []string
+	for _, svc := range cfg.Services {
+		for _, call := range svc.DownstreamCalls {
+			if call == target {
+				names = append(names, svc.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func serviceCallCycle(cfg Config) []string {
+	state := make(map[string]uint8, len(cfg.Services))
+	indices := indexServices(cfg)
+	stack := make([]string, 0, len(cfg.Services))
+	var visit func(string) []string
+	visit = func(name string) []string {
+		switch state[name] {
+		case 1:
+			for i, item := range stack {
+				if item == name {
+					return append(append([]string(nil), stack[i:]...), name)
+				}
+			}
+		case 2:
+			return nil
+		}
+		state[name] = 1
+		stack = append(stack, name)
+		svc := indices[name]
+		for _, call := range svc.DownstreamCalls {
+			if cycle := visit(call); len(cycle) > 0 {
+				return cycle
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[name] = 2
+		return nil
+	}
+	for _, svc := range cfg.Services {
+		if cycle := visit(svc.Name); len(cycle) > 0 {
+			return cycle
+		}
+	}
+	return nil
+}
+
+func effectiveMetricConfig(svc Service) MetricConfig {
+	var cfg MetricConfig
+	if svc.Metric != nil {
+		cfg = *svc.Metric
+	}
+	if cfg.Type == "" {
+		cfg.Type = "sum"
+	}
+	if cfg.Name == "" {
+		switch cfg.Type {
+		case "gauge":
+			cfg.Name = svc.Name + ".load"
+		case "histogram":
+			cfg.Name = svc.Name + ".request.duration"
+		default:
+			cfg.Name = svc.Name + ".requests.total"
+		}
+	}
+	if cfg.Unit == "" {
+		if cfg.Type == "histogram" {
+			cfg.Unit = "ms"
+		} else {
+			cfg.Unit = "1"
+		}
+	}
+	return cfg
+}
+
+func effectiveLogSeverity(svc Service) string {
+	if svc.LogSeverity == "" {
+		return "info"
+	}
+	return svc.LogSeverity
 }
 
 // LoadConfig reads and applies config.json, normalizing and validating the result.

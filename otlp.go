@@ -3,96 +3,14 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	mathrand "math/rand/v2"
 	"strings"
 	"time"
 
-	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
-	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
-	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
-	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
-	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
-	"google.golang.org/protobuf/proto"
 )
-
-func buildPayload(cfg Config, svc Service, kind signalKind) ([]byte, error) {
-	now := time.Now()
-	resource := &resourcepb.Resource{Attributes: svcAttributes(cfg, svc)}
-	scope := &commonpb.InstrumentationScope{Name: "otgen", Version: "1.0.0"}
-
-	switch kind {
-	case signalSpans:
-		traceID := randomBytes(16)
-		rootID := randomBytes(8)
-		failed := mathrand.IntN(100) < svc.FailureRate
-		rootDur := randomRootDuration()
-		rootEnd := now.Add(rootDur)
-		root := newSpan(svc, traceID, rootID, now, rootEnd, failed)
-
-		spans := []*tracepb.Span{root}
-		offset := 5 * time.Millisecond
-		for i := 0; i < svc.ChildSpans; i++ {
-			childID := randomBytes(8)
-			childDur := randomChildDuration()
-			childStart := now.Add(offset)
-			childEnd := childStart.Add(childDur)
-			if childEnd.After(rootEnd) {
-				childEnd = rootEnd
-			}
-			spans = append(spans, newChildSpan(svc.Name, traceID, childID, rootID, childStart, childEnd, i, failed))
-			offset += childDur + 2*time.Millisecond
-		}
-
-		return proto.Marshal(&collectortracepb.ExportTraceServiceRequest{
-			ResourceSpans: []*tracepb.ResourceSpans{{
-				Resource:   resource,
-				ScopeSpans: []*tracepb.ScopeSpans{{Scope: scope, Spans: spans}},
-			}},
-		})
-	case signalMetrics:
-		return proto.Marshal(&collectormetricspb.ExportMetricsServiceRequest{
-			ResourceMetrics: []*metricspb.ResourceMetrics{{
-				Resource: resource,
-				ScopeMetrics: []*metricspb.ScopeMetrics{{
-					Scope: scope,
-					Metrics: []*metricspb.Metric{{
-						Name: svc.Name + ".requests.total",
-						Unit: "1",
-						Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
-							AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
-							IsMonotonic:            true,
-							DataPoints: []*metricspb.NumberDataPoint{{
-								TimeUnixNano: uint64(now.UnixNano()),
-								Value:        &metricspb.NumberDataPoint_AsInt{AsInt: int64(now.UnixNano()%7 + 1)},
-							}},
-						}},
-					}},
-				}},
-			}},
-		})
-	case signalLogs:
-		return proto.Marshal(&collectorlogspb.ExportLogsServiceRequest{
-			ResourceLogs: []*logspb.ResourceLogs{{
-				Resource: resource,
-				ScopeLogs: []*logspb.ScopeLogs{{
-					Scope: scope,
-					LogRecords: []*logspb.LogRecord{{
-						TimeUnixNano:   uint64(now.UnixNano()),
-						SeverityNumber: logspb.SeverityNumber_SEVERITY_NUMBER_INFO,
-						SeverityText:   "INFO",
-						Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc.Name + " synthetic log"}},
-					}},
-				}},
-			}},
-		})
-	default:
-		return nil, fmt.Errorf("unsupported signal type: %s", kind)
-	}
-}
 
 // svcAttributes builds the resource attribute list for a service.
 // Precedence (high → low): service.name > svc.Attributes > infraDefaults > cfg.Attributes (global).
@@ -100,9 +18,117 @@ func svcAttributes(cfg Config, svc Service) []*commonpb.KeyValue {
 	merged := make(map[string]AttrValue, len(cfg.Attributes)+len(svc.Attributes)+8)
 	mergeAttrs(merged, cfg.Attributes)
 	mergeAttrs(merged, infraDefaults(svc))
+	if svc.Mesh {
+		mergeAttrs(merged, istioResourceAttrs(svc))
+	}
 	mergeAttrs(merged, svc.Attributes)
 	merged["service.name"] = strAttrVal(svc.Name)
 	return toOTLPAttributes(merged)
+}
+
+func istioResourceAttrs(svc Service) map[string]AttrValue {
+	return map[string]AttrValue{
+		"service.istio.io/canonical-name":     strAttrVal(svc.Name),
+		"service.istio.io/canonical-revision": strAttrVal("v1"),
+		"service.istio.io/workload-name":      strAttrVal(svc.Name),
+	}
+}
+
+func istioWorkloads(svc Service) (source, destination string) {
+	source, destination = svc.Name+"-client", svc.Name
+	switch strings.ToLower(strings.TrimSpace(svc.SpanKind)) {
+	case "client", "producer":
+		source, destination = svc.Name, svc.Name+"-backend"
+	}
+	return source, destination
+}
+
+func istioSpanAttrs(svc Service) []*commonpb.KeyValue {
+	source, destination := istioWorkloads(svc)
+	return []*commonpb.KeyValue{
+		stringAttr("source.workload.name", source),
+		stringAttr("source.workload.namespace", "default"),
+		stringAttr("source.workload.uid", "source-"+source),
+		stringAttr("source.principal", "cluster.local/ns/default/sa/"+source),
+		stringAttr("destination.workload.name", destination),
+		stringAttr("destination.workload.namespace", "default"),
+		stringAttr("destination.workload.uid", "destination-"+destination),
+		stringAttr("destination.principal", "cluster.local/ns/default/sa/"+destination),
+		stringAttr("destination.service.name", svc.Name),
+		stringAttr("destination.service.namespace", "default"),
+		stringAttr("source.cluster", "cluster-1"),
+		stringAttr("destination.cluster", "cluster-1"),
+		stringAttr("connection.security_policy", "mutual_tls"),
+	}
+}
+
+func istioMetricAttrs(svc Service, failed bool) []*commonpb.KeyValue {
+	source, destination := istioWorkloads(svc)
+	reporter := "destination"
+	if source == svc.Name {
+		reporter = "source"
+	}
+	code := "200"
+	if failed {
+		code = "500"
+	}
+	return []*commonpb.KeyValue{
+		stringAttr("reporter", reporter),
+		stringAttr("source_workload", source),
+		stringAttr("source_workload_namespace", "default"),
+		stringAttr("source_canonical_service", source),
+		stringAttr("source_canonical_revision", "v1"),
+		stringAttr("source_principal", "cluster.local/ns/default/sa/"+source),
+		stringAttr("destination_workload", destination),
+		stringAttr("destination_workload_namespace", "default"),
+		stringAttr("destination_canonical_service", destination),
+		stringAttr("destination_canonical_revision", "v1"),
+		stringAttr("destination_principal", "cluster.local/ns/default/sa/"+destination),
+		stringAttr("destination_service", svc.Name+".default.svc.cluster.local"),
+		stringAttr("destination_service_name", svc.Name),
+		stringAttr("destination_service_namespace", "default"),
+		stringAttr("response_code", code),
+		stringAttr("response_flags", "-"),
+		stringAttr("connection_security_policy", "mutual_tls"),
+		stringAttr("source_cluster", "cluster-1"),
+		stringAttr("destination_cluster", "cluster-1"),
+	}
+}
+
+func istioMetrics(svc Service, now time.Time, failed bool) []*metricspb.Metric {
+	attrs := istioMetricAttrs(svc, failed)
+	duration := float64(randomRootDuration() / time.Millisecond)
+	requestBytes := float64(512 + mathrand.IntN(4096))
+	responseBytes := float64(1024 + mathrand.IntN(8192))
+	return []*metricspb.Metric{
+		{
+			Name: "istio_requests_total", Unit: "1",
+			Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
+				AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+				IsMonotonic:            true,
+				DataPoints: []*metricspb.NumberDataPoint{{
+					TimeUnixNano: uint64(now.UnixNano()), Attributes: attrs,
+					Value: &metricspb.NumberDataPoint_AsInt{AsInt: 1},
+				}},
+			}},
+		},
+		istioHistogram("istio_request_duration_milliseconds", "ms", now, duration, attrs),
+		istioHistogram("istio_request_bytes", "By", now, requestBytes, attrs),
+		istioHistogram("istio_response_bytes", "By", now, responseBytes, attrs),
+	}
+}
+
+func istioHistogram(name, unit string, now time.Time, value float64, attrs []*commonpb.KeyValue) *metricspb.Metric {
+	return &metricspb.Metric{
+		Name: name, Unit: unit,
+		Data: &metricspb.Metric_Histogram{Histogram: &metricspb.Histogram{
+			AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+			DataPoints: []*metricspb.HistogramDataPoint{{
+				TimeUnixNano: uint64(now.UnixNano()), Attributes: attrs,
+				Count: 1, Sum: &value, BucketCounts: []uint64{1}, ExplicitBounds: []float64{value},
+			}},
+		}},
+	}
 }
 
 // k8sAttrs returns the Kubernetes resource attributes shared by every
@@ -324,6 +350,9 @@ func newSpan(svc Service, traceID, spanID []byte, start, end time.Time, failed b
 		EndTimeUnixNano:   uint64(end.UnixNano()),
 	}
 	applyFailure(span, failed)
+	if svc.Mesh {
+		tmplAttrs = append(tmplAttrs, istioSpanAttrs(svc)...)
+	}
 	tmplAttrs = applySpanAttrOverrides(tmplAttrs, svc.SpanAttrs)
 	span.Attributes = append(span.Attributes, tmplAttrs...)
 	return span
